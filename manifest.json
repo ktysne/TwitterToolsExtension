@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "TwitterToolsExtension",
+  "version": "1.0.0",
+  "description": "X(旧Twitter)用の便利機能ツール集。ブロック/ミュート済みアカウントの投稿の非表示、複数画像の一括保存、タイムライン動画の自動再生停止を提供します。",
+  "permissions": ["storage", "downloads"],
+  "host_permissions": [
+    "*://*.x.com/*",
+    "*://*.twitter.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TwitterToolsExtension"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
+      "js": ["bridge.js", "imagesave.js", "mutemenu.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": true
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Packaged extension artifacts
+*.zip
+*.crx
+*.pem
