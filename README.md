@@ -99,6 +99,20 @@ API レスポンスに含まれる関係情報(`relationship_perspectives` の `
 | `mutemenu.js` | ISOLATED world。⋯ メニューへの「拡張機能でミュート」項目の追加 |
 | `background.js` | service worker。`chrome.downloads` で保存を実行 |
 | `popup.html` / `popup.js` | ツールバーの設定パネル |
+| `test/` | `node:test` による単体テスト(外部依存なし) |
+| `package.json` | `npm test`(= `node --test`)の定義 |
+
+## テスト
+
+ロジックの中核(レスポンスのフィルタ、保存URL/パスの検証、保存名の組み立て)は、
+DOM に依存しない純粋関数として切り出し、Node 標準のテストランナーで検証しています。
+外部依存はありません。
+
+```
+npm test        # = node --test（Node 18 以降）
+```
+
+詳細は [docs/testing.md](docs/testing.md) を参照してください。
 
 ## 技術ドキュメント
 
@@ -109,3 +123,4 @@ API レスポンスに含まれる関係情報(`relationship_perspectives` の `
 - [docs/video-autoplay.md](docs/video-autoplay.md): 動画の自動再生の停止
 - [docs/media-save.md](docs/media-save.md): 画像と動画の保存
 - [docs/word-mute.md](docs/word-mute.md): ワードミュートと @id ミュート
+- [docs/testing.md](docs/testing.md): 単体テストの方針と実行方法

@@ -69,3 +69,17 @@ X はレスポンスを自前のリスナで読むため、`send` 内で後か�
 `interceptor.js` は、解析や書き換えに失敗したとき、必ず元のレスポンスをそのまま返す。
 フックが原因で X が壊れることを避けるためである。
 判定に必要なフィールドが無い投稿は「対象でない」とみなして残す(誤って消さない)。
+
+## テスト可能性
+
+除外判定（`filterPayload` / `itemContentIsBad` など）は、設定を `ctx = { relOn, rules }`
+として引数で受け取る純粋関数にしてある。DOM(`<html data-tte-enabled>` や
+`__tteMuteRules`)を読むのはレスポンスごとに 1 度だけで、その結果を `ctx` に詰めて
+再帰に渡す。同様に、保存URL/パスの検証(`background.js`)や保存名の組み立て
+(`imagesave.js`)も DOM やネットワークに依存しない関数に分けてある。
+
+これらの関数は Node から `require` して `node:test` で検証している。
+各スクリプトは、ブラウザ API を触る副作用を「その API があるときだけ」実行するよう
+ガードし、末尾で Node のときだけ純粋関数を `module.exports` する。
+ブラウザでは `module` が未定義なので公開行は何もせず、content script としての挙動は変わらない。
+詳細は [testing.md](testing.md) を参照。

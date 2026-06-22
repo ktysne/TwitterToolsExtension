@@ -1,0 +1,9 @@
+{
+  "name": "twitter-tools-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unit tests for TwitterToolsExtension (Chrome MV3 extension).",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -8,3 +8,7 @@ Thumbs.db
 *.zip
 *.crx
 *.pem
+
+# Node (tests)
+node_modules/
+npm-debug.log*

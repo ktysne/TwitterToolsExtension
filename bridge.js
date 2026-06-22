@@ -106,7 +106,8 @@
     if (msg && msg.type === "tte-get-count") {
       const v = document.documentElement.getAttribute("data-tte-removed");
       sendResponse({ total: v ? parseInt(v, 10) || 0 : 0 });
+      // 同期で応答済み。チャネルを開いたままにしない。
     }
-    return true;
+    // 無関係なメッセージはここでは応答しない（他のリスナに委ねる）
   });
 })();
