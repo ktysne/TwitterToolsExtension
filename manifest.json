@@ -25,7 +25,7 @@
     },
     {
       "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
-      "js": ["bridge.js", "imagesave.js", "mutemenu.js"],
+      "js": ["bridge.js", "imagesave.js", "mutemenu.js", "domhide.js"],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": true

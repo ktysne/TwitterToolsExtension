@@ -97,6 +97,7 @@ API レスポンスに含まれる関係情報(`relationship_perspectives` の `
 | `bridge.js` | ISOLATED world。設定とミュートのルールを MAIN world へ橋渡し |
 | `imagesave.js` | ISOLATED world。保存ボタンの設置とURL収集 |
 | `mutemenu.js` | ISOLATED world。⋯ メニューへの「拡張機能でミュート」項目の追加 |
+| `domhide.js` | ISOLATED world。ルール変更時に描画済みの該当投稿を即時非表示 |
 | `background.js` | service worker。`chrome.downloads` で保存を実行 |
 | `popup.html` / `popup.js` | ツールバーの設定パネル |
 

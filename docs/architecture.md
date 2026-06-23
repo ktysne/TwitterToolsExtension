@@ -13,7 +13,7 @@ ISOLATED world で `window.fetch` を上書きしても、ページ本体の fet
 そこで、役割を 2 つのスクリプトに分けている。
 
 - **MAIN world**(`interceptor.js`)：ページと同じ世界で動き、`fetch` と `XMLHttpRequest`、`HTMLMediaElement.prototype.play` をフックする。
-- **ISOLATED world**(`bridge.js`、`imagesave.js`、`mutemenu.js`)：`chrome.*` API を使い、設定の読み書き、保存依頼、メニューへの項目追加を行う。
+- **ISOLATED world**(`bridge.js`、`imagesave.js`、`mutemenu.js`、`domhide.js`)：`chrome.*` API を使い、設定の読み書き、保存依頼、メニューへの項目追加、描画済み投稿の即時非表示を行う。
 
 `manifest.json` の `content_scripts` で、前者に `"world": "MAIN"` を指定して注入している。
 
@@ -43,6 +43,7 @@ ISOLATED world はページの `fetch` をフックできない。
 - `bridge.js`：設定を data 属性へ、ミュートのルールを `__tteMuteRules` へ反映する。ポップアップからの件数問い合わせに答える。
 - `imagesave.js`：メディア投稿に保存ボタンを設置し、保存対象のURLを集めて `background.js` へ渡す。
 - `mutemenu.js`：投稿の ⋯ メニューに「拡張機能でミュート」項目を足し、クリックで著者の @id を `muteHandles` に追加/解除する。
+- `domhide.js`：ワード/@id ミュートのルールが変わったとき、すでに描画済みの一致する投稿を DOM 上で即座に隠す(新規読み込み分は `interceptor.js` が処理する)。
 - `background.js`：受け取ったURLを `chrome.downloads` で保存する。コンテンツスクリプトは `chrome.downloads` を直接呼べないため、ここが実行役になる。
 - `popup.html` と `popup.js`：各機能のトグルと、ワード・@id ミュートの入力欄、現在のタブでのミュート件数を表示する。
 

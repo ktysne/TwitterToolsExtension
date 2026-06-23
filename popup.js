@@ -35,6 +35,12 @@ chrome.storage.local.get(
     wordsEl.value = (cfg.muteWords || []).join("\n");
     regexEl.value = (cfg.muteRegexes || []).join("\n");
     handlesEl.value = (cfg.muteHandles || []).join("\n");
+    // 読み込んだ内容を保存済みの基準にする（無変更で閉じても再書き込みしない）
+    lastSaved = JSON.stringify([
+      parseLines(wordsEl.value),
+      parseLines(regexEl.value),
+      parseLines(handlesEl.value).map((h) => h.replace(/^@/, "")),
+    ]);
   }
 );
 
@@ -45,35 +51,60 @@ function parseLines(v) {
     .filter(Boolean);
 }
 
-// 入力をデバウンスして保存（不正な正規表現は警告だけ出し、入力自体は保存する）
+// 入力内容を保存する（不正な正規表現は警告だけ出し、入力自体は保存する）
 let saveTimer = null;
+let lastSaved = "";
+
+function doSave() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const words = parseLines(wordsEl.value);
+  const regexes = parseLines(regexEl.value);
+  const handles = parseLines(handlesEl.value).map((h) => h.replace(/^@/, ""));
+  const invalid = regexes.filter((src) => {
+    try {
+      new RegExp(src);
+      return false;
+    } catch (_) {
+      return true;
+    }
+  });
+  regexErrEl.textContent = invalid.length
+    ? "無効な正規表現（無視されます）: " + invalid.join(" / ")
+    : "";
+  // 変化が無ければ書き込まない（閉じる時の多重発火対策）
+  const snapshot = JSON.stringify([words, regexes, handles]);
+  if (snapshot === lastSaved) return;
+  lastSaved = snapshot;
+  chrome.storage.local.set({
+    muteWords: words,
+    muteRegexes: regexes,
+    muteHandles: handles,
+  });
+}
+
+// 入力中はデバウンスして保存
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    const words = parseLines(wordsEl.value);
-    const regexes = parseLines(regexEl.value);
-    const handles = parseLines(handlesEl.value).map((h) => h.replace(/^@/, ""));
-    const invalid = regexes.filter((src) => {
-      try {
-        new RegExp(src);
-        return false;
-      } catch (_) {
-        return true;
-      }
-    });
-    regexErrEl.textContent = invalid.length
-      ? "無効な正規表現（無視されます）: " + invalid.join(" / ")
-      : "";
-    chrome.storage.local.set({
-      muteWords: words,
-      muteRegexes: regexes,
-      muteHandles: handles,
-    });
-  }, 400);
+  saveTimer = setTimeout(doSave, 400);
 }
 wordsEl.addEventListener("input", scheduleSave);
 regexEl.addEventListener("input", scheduleSave);
 handlesEl.addEventListener("input", scheduleSave);
+
+// ポップアップが閉じる/隠れる/フォーカスを失う直前に確実に保存する。
+// （デバウンスのタイマーが発火する前に閉じると保存が失われるため）
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) doSave();
+});
+window.addEventListener("pagehide", doSave);
+window.addEventListener("blur", doSave);
+// 入力欄からフォーカスが外れた時点でも保存（貼り付け→別操作で確実に）
+wordsEl.addEventListener("change", doSave);
+regexEl.addEventListener("change", doSave);
+handlesEl.addEventListener("change", doSave);
 
 // アクティブタブでの除外件数
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
