@@ -41,6 +41,8 @@ chrome.storage.local.get(
       parseLines(regexEl.value),
       parseLines(handlesEl.value).map((h) => h.replace(/^@/, "")),
     ]);
+    // 読み込み完了。これ以降のみ保存を許可する（空での上書きを防ぐ）
+    loaded = true;
   }
 );
 
@@ -54,12 +56,18 @@ function parseLines(v) {
 // 入力内容を保存する（不正な正規表現は警告だけ出し、入力自体は保存する）
 let saveTimer = null;
 let lastSaved = "";
+// ストレージ読み込みが完了するまで保存しない。
+// 読み込み前に閉じる/隠れると textarea は空のままで、既存ルールを空配列で
+// 上書きしてしまう race を防ぐ。
+let loaded = false;
 
 function doSave() {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  // まだ読み込めていない場合は何もしない（空での上書き防止）
+  if (!loaded) return;
   const words = parseLines(wordsEl.value);
   const regexes = parseLines(regexEl.value);
   const handles = parseLines(handlesEl.value).map((h) => h.replace(/^@/, ""));
