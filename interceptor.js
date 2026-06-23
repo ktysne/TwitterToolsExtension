@@ -61,7 +61,10 @@
   // 改竄レスポンスが任意ホストのURLを variants に混入させても拾わない。
   function isSafeMediaUrl(url) {
     try {
-      const u = new URL(url, location.href);
+      // メディアURLは絶対URLだが、相対URL混入時の基準として location を使う。
+      // Node（テスト）では location が無いので固定の基準を当てる。
+      const base = typeof location !== "undefined" ? location.href : "https://x.com/";
+      const u = new URL(url, base);
       return (
         u.protocol === "https:" &&
         (u.hostname === "twimg.com" || u.hostname.endsWith(".twimg.com"))
@@ -160,38 +163,46 @@
     handles: new Set(),
   };
 
+  // JSON 文字列（bridge.js が書く __tteMuteRules の中身）を解析して
+  // { raw, enabled, words[], regexes[RegExp], handleEnabled, handles:Set } にする。
+  // DOM に依存しない純粋関数なので単体テストできる。
+  function parseMuteRules(raw) {
+    let enabled = false,
+      words = [],
+      regexes = [],
+      handleEnabled = false,
+      handles = new Set();
+    try {
+      const p = JSON.parse(raw || "{}");
+      enabled = !!p.enabled;
+      words = (p.words || [])
+        .map((w) => String(w).toLowerCase())
+        .filter(Boolean);
+      regexes = (p.regexes || [])
+        .map((s) => {
+          try {
+            return new RegExp(String(s), "i");
+          } catch (_) {
+            return null; // 不正な正規表現は無視
+          }
+        })
+        .filter(Boolean);
+      handleEnabled = !!p.handleEnabled;
+      handles = new Set(
+        (p.handles || [])
+          .map((h) => String(h).replace(/^@/, "").toLowerCase())
+          .filter(Boolean)
+      );
+    } catch (_) {}
+    return { raw: raw || "", enabled, words, regexes, handleEnabled, handles };
+  }
+
   function getMuteRules() {
     const node = document.getElementById("__tteMuteRules");
     const raw = (node && node.textContent) || "";
     if (raw !== muteCache.raw) {
-      let enabled = false,
-        words = [],
-        regexes = [],
-        handleEnabled = false,
-        handles = new Set();
-      try {
-        const p = JSON.parse(raw || "{}");
-        enabled = !!p.enabled;
-        words = (p.words || [])
-          .map((w) => String(w).toLowerCase())
-          .filter(Boolean);
-        regexes = (p.regexes || [])
-          .map((s) => {
-            try {
-              return new RegExp(String(s), "i");
-            } catch (_) {
-              return null; // 不正な正規表現は無視
-            }
-          })
-          .filter(Boolean);
-        handleEnabled = !!p.handleEnabled;
-        handles = new Set(
-          (p.handles || [])
-            .map((h) => String(h).replace(/^@/, "").toLowerCase())
-            .filter(Boolean)
-        );
-      } catch (_) {}
-      muteCache = { raw, enabled, words, regexes, handleEnabled, handles };
+      // JSON 文字列が変わったときだけ解析し直してキャッシュする
+      muteCache = parseMuteRules(raw);
     }
     return muteCache;
   }
@@ -250,9 +261,9 @@
     return text;
   }
 
-  function textMatchesMute(text) {
+  function textMatchesMute(text, rules) {
     if (!text) return false;
-    const r = getMuteRules();
+    const r = rules;
     const lower = text.toLowerCase();
     for (const w of r.words) if (lower.includes(w)) return true;
     for (const re of r.regexes) {
@@ -263,12 +274,13 @@
     return false;
   }
 
-  // itemContent（単一エントリ or モジュール内アイテム）が
-  // 除外対象（ブロック/ミュート、またはワードミュート一致）か
-  function itemContentIsBad(ic) {
+  // itemContent（単一エントリ or モジュール内アイテム）が除外対象か。
+  // ctx = { relOn:boolean, rules:parseMuteRules の戻り値 } を受け取り、DOM に
+  // 触れない純粋判定にしてある（レスポンス1件につき ctx を1度だけ作る）。
+  function itemContentIsBad(ic, ctx) {
     if (!ic) return false;
-    const rules = getMuteRules();
-    const relOn = isEnabled();
+    const rules = ctx.rules;
+    const relOn = ctx.relOn;
 
     // 投稿
     const tweetResult = ic.tweet_results && ic.tweet_results.result;
@@ -279,7 +291,8 @@
           t && t.core && t.core.user_results && t.core.user_results.result;
         if (isBadPerspectives(ur && ur.relationship_perspectives)) return true;
       }
-      if (rules.enabled && textMatchesMute(tweetTextOf(tweetResult))) return true;
+      if (rules.enabled && textMatchesMute(tweetTextOf(tweetResult), rules))
+        return true;
       if (rules.handleEnabled && rules.handles.size) {
         for (const h of authorHandlesOf(tweetResult)) {
           if (rules.handles.has(h)) return true;
@@ -304,7 +317,7 @@
 
   // --- エントリ配列のフィルタ -------------------------------------------
 
-  function filterEntries(entries) {
+  function filterEntries(entries, ctx) {
     let removed = 0;
 
     const kept = entries.filter((entry) => {
@@ -313,7 +326,7 @@
 
       // 1) 単一アイテム（1ツイート / 1ユーザー）
       if (content.itemContent) {
-        if (itemContentIsBad(content.itemContent)) {
+        if (itemContentIsBad(content.itemContent, ctx)) {
           removed++;
           return false;
         }
@@ -325,7 +338,7 @@
         const before = content.items.length;
         content.items = content.items.filter((it) => {
           const ic = it && it.item && it.item.itemContent;
-          if (itemContentIsBad(ic)) return false;
+          if (itemContentIsBad(ic, ctx)) return false;
           return true;
         });
         removed += before - content.items.length;
@@ -340,9 +353,11 @@
     return { kept, removed };
   }
 
-  // instructions を持つオブジェクトを再帰的に探して各 entries をフィルタ
-  function filterPayload(root) {
+  // instructions を持つオブジェクトを再帰的に探して各 entries をフィルタ。
+  // ctx を省略した場合は現在の DOM 設定から組み立てる（実行時の呼び出し用）。
+  function filterPayload(root, ctx) {
     let removed = 0;
+    if (!ctx) ctx = { relOn: isEnabled(), rules: getMuteRules() };
 
     function walk(node) {
       if (!node || typeof node !== "object") return;
@@ -350,7 +365,7 @@
       if (Array.isArray(node.instructions)) {
         for (const ins of node.instructions) {
           if (Array.isArray(ins.entries)) {
-            const res = filterEntries(ins.entries);
+            const res = filterEntries(ins.entries, ctx);
             ins.entries = res.kept;
             removed += res.removed;
           }
@@ -359,7 +374,7 @@
             const before = ins.moduleItems.length;
             ins.moduleItems = ins.moduleItems.filter((it) => {
               const ic = it && it.item && it.item.itemContent;
-              return !itemContentIsBad(ic);
+              return !itemContentIsBad(ic, ctx);
             });
             removed += before - ins.moduleItems.length;
           }
@@ -378,7 +393,7 @@
 
   // --- fetch フック ------------------------------------------------------
 
-  const origFetch = window.fetch;
+  const origFetch = typeof window !== "undefined" ? window.fetch : undefined;
   if (typeof origFetch === "function") {
     window.fetch = async function (input, init) {
       const res = await origFetch.apply(this, arguments);
@@ -554,4 +569,22 @@
       return origMediaPlay.apply(this, arguments);
     };
   } catch (_) {}
+
+  // Node（単体テスト）でのみ純粋関数を公開する。ブラウザでは module が
+  // 未定義なので何もしない（content script の挙動は変わらない）。
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      parseMuteRules,
+      textMatchesMute,
+      isBadPerspectives,
+      screenNameOf,
+      authorHandlesOf,
+      tweetTextOf,
+      unwrapTweet,
+      bestMp4Url,
+      itemContentIsBad,
+      filterEntries,
+      filterPayload,
+    };
+  }
 })();

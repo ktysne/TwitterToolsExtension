@@ -57,13 +57,15 @@ function fromTwitter(sender) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+// メッセージを受けて検証済みのダウンロードを開始する。
+// download の実体（chrome.downloads.download）は呼び出し側から差し込めるよう
+// にして、ロジックを単体テストできるようにしてある。
+function handleDownloadMessage(msg, sender, download) {
   if (!(msg && msg.type === "tte-download-images" && Array.isArray(msg.items))) {
-    return; // 関係ないメッセージは無視
+    return null; // 関係ないメッセージは無視（応答しない）
   }
   if (!fromTwitter(sender)) {
-    sendResponse({ ok: false, started: 0 });
-    return; // 応答は同期で返している
+    return { ok: false, started: 0 };
   }
 
   let started = 0;
@@ -73,10 +75,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const filename = safeFilename(item.filename);
     if (!url || !filename) return;
     try {
-      chrome.downloads.download({ url, filename, saveAs: false });
+      download({ url, filename, saveAs: false });
       started++;
     } catch (_) {}
   });
-  sendResponse({ ok: true, started });
-  return true; // 非同期応答の余地を残す
-});
+  return { ok: true, started };
+}
+
+// service worker 実行時のみリスナを張る（Node でのテスト読み込み時は張らない）
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    const resp = handleDownloadMessage(msg, sender, (opts) =>
+      chrome.downloads.download(opts)
+    );
+    if (resp === null) return; // 無関係なメッセージ
+    sendResponse(resp); // 応答は同期で返す
+  });
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { safeUrl, safeFilename, fromTwitter, handleDownloadMessage };
+}

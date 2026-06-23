@@ -24,9 +24,7 @@
 
   let enabled = true;
 
-  // ---- スタイル ----
-  const style = document.createElement("style");
-  style.textContent = `
+  const STYLE_TEXT = `
     .tte-saveall-wrap{position:absolute;top:8px;right:8px;z-index:50;}
     .tte-saveall{
       font:600 12px/1 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif;
@@ -37,7 +35,12 @@
     .tte-saveall:hover{background:#1d9bf0;border-color:#1d9bf0;opacity:1;}
     .tte-saveall[disabled]{cursor:default;opacity:.8;}
   `;
-  (document.head || document.documentElement).appendChild(style);
+
+  function injectStyle() {
+    const style = document.createElement("style");
+    style.textContent = STYLE_TEXT;
+    (document.head || document.documentElement).appendChild(style);
+  }
 
   // ---- ヘルパ ----
   function sanitize(s) {
@@ -45,8 +48,23 @@
   }
 
   function mediaIdOf(img) {
-    const m = img && img.src.match(/\/media\/([^?\/]+)/);
+    const m = img && img.src && img.src.match(/\/media\/([^?\/]+)/);
     return m ? m[1] : null;
+  }
+
+  // 表示中の画像URLから format を取り出す（既知の画像形式のみ採用）。
+  // 不明・未指定なら jpg にフォールバック。ファイル名の拡張子に使う。
+  function pickFormat(src) {
+    try {
+      const f = new URL(src, "https://pbs.twimg.com/").searchParams.get("format");
+      if (f && /^(jpg|jpeg|png|webp|gif)$/i.test(f)) return f.toLowerCase();
+    } catch (_) {}
+    return "jpg";
+  }
+
+  // メディアIDと format から原寸（name=orig）の画像URLを組み立てる
+  function origImageUrl(id, fmt) {
+    return `https://pbs.twimg.com/media/${id}?format=${fmt}&name=orig`;
   }
 
   function tweetMetaOf(article) {
@@ -92,16 +110,11 @@
       const id = mediaIdOf(img);
       if (!id || seen.has(id)) return;
       seen.add(id);
-      // format は既知の画像形式のみ採用（ファイル名拡張子に使うため）
-      let fmt = "jpg";
-      try {
-        const f = new URL(img.src).searchParams.get("format");
-        if (f && /^(jpg|jpeg|png|webp|gif)$/i.test(f)) fmt = f.toLowerCase();
-      } catch (_) {}
+      const fmt = pickFormat(img.src);
       const photoM = (a.getAttribute("href") || "").match(/\/photo\/(\d+)/);
       const n = photoM ? photoM[1] : out.length + 1;
       out.push({
-        url: `https://pbs.twimg.com/media/${id}?format=${fmt}&name=orig`,
+        url: origImageUrl(id, fmt),
         filename: `${FOLDER}/${sanitize(handle)}_${tweetId || "img"}_${n}.${fmt}`,
       });
     });
@@ -250,32 +263,45 @@
     document.querySelectorAll(".tte-saveall-wrap").forEach((el) => el.remove());
   }
 
-  // ---- 設定 ----
-  chrome.storage.local.get({ imageSave: true }, (cfg) => {
-    enabled = cfg.imageSave;
-    if (enabled) scan();
-  });
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.imageSave) {
-      enabled = changes.imageSave.newValue;
-      if (enabled) scan();
-      else removeAll();
-    }
-  });
+  // ---- 起動（ブラウザの content script としてのみ動かす） ----
+  // Node（単体テスト）では document / chrome が無いので何もせず、純粋関数だけ
+  // を公開する。ブラウザでの挙動はこれまでと変わらない。
+  if (typeof document !== "undefined" && typeof chrome !== "undefined") {
+    injectStyle();
 
-  // ---- 監視（XはSPAで遅延描画・仮想スクロールするため） ----
-  let timer = null;
-  const observer = new MutationObserver(() => {
-    if (timer) return;
-    timer = setTimeout(() => {
-      timer = null;
+    // ---- 設定 ----
+    chrome.storage.local.get({ imageSave: true }, (cfg) => {
+      enabled = cfg.imageSave;
+      if (enabled) scan();
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.imageSave) {
+        enabled = changes.imageSave.newValue;
+        if (enabled) scan();
+        else removeAll();
+      }
+    });
+
+    // ---- 監視（XはSPAで遅延描画・仮想スクロールするため） ----
+    let timer = null;
+    const observer = new MutationObserver(() => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        scan();
+      }, 250);
+    });
+    const startObserving = () => {
+      observer.observe(document.body, { childList: true, subtree: true });
       scan();
-    }, 250);
-  });
-  const startObserving = () => {
-    observer.observe(document.body, { childList: true, subtree: true });
-    scan();
-  };
-  if (document.body) startObserving();
-  else document.addEventListener("DOMContentLoaded", startObserving, { once: true });
+    };
+    if (document.body) startObserving();
+    else {
+      document.addEventListener("DOMContentLoaded", startObserving, { once: true });
+    }
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { sanitize, mediaIdOf, pickFormat, origImageUrl };
+  }
 })();
