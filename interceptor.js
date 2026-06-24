@@ -559,11 +559,21 @@
       try {
         if (autoplayDisabled() && !userInitiated()) {
           // 自動再生とみなして停止状態を維持。
-          // 呼び出し側が .then/.catch していても壊れないよう解決済みPromiseを返す。
+          // ここで解決済み Promise を返すと、X のプレイヤーは「再生成功」と判断し、
+          // 実際にはデータが進まないためバッファリング扱いとなり、
+          // ローディングスピナー(progressbar)が回り続けてしまう。
+          // そこでブラウザ標準の自動再生ブロックと同じ NotAllowedError で reject する。
+          // X はこの拒否を「自動再生不可」として正しく処理し、スピナーを出さずに
+          // 再生オーバーレイ表示の停止状態にしてくれる(実機検証済み)。
           try {
             this.pause();
           } catch (_) {}
-          return Promise.resolve();
+          return Promise.reject(
+            new DOMException(
+              "play() blocked: autoplay suppressed by TwitterToolsExtension",
+              "NotAllowedError"
+            )
+          );
         }
       } catch (_) {}
       return origMediaPlay.apply(this, arguments);
