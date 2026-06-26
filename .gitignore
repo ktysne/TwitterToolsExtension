@@ -12,3 +12,6 @@ Thumbs.db
 # Node (tests)
 node_modules/
 npm-debug.log*
+
+# CodeGraph local index
+.codegraph/
