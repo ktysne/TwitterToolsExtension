@@ -84,49 +84,88 @@
     return mp4[0].url;
   }
 
-  function harvestMedia(root) {
-    let changed = false;
+  // 1ツイートが直接持つ動画/GIFの最高画質 mp4 URL を配列で返す（重複は除く）。
+  function ownVideoUrls(tw) {
+    const lg = tw && tw.legacy;
+    if (!lg) return [];
+    const media =
+      (lg.extended_entities && lg.extended_entities.media) ||
+      (lg.entities && lg.entities.media);
+    if (!Array.isArray(media)) return [];
+    const out = [];
+    media.forEach((m) => {
+      if (
+        m &&
+        (m.type === "video" || m.type === "animated_gif") &&
+        m.video_info
+      ) {
+        const url = bestMp4Url(m.video_info.variants);
+        if (url && out.indexOf(url) === -1) out.push(url);
+      }
+    });
+    return out;
+  }
+
+  // 引用ツイート（quoted_status_result.result）を取り出す。可視性ラッパも剥がす。
+  function quotedTweetOf(tw) {
+    const q =
+      tw && tw.quoted_status_result && tw.quoted_status_result.result;
+    return unwrapTweet(q);
+  }
+
+  // レスポンスから { tweetId: [mp4url,...] } を組み立てる純粋関数（DOM非依存）。
+  // 各ツイート自身の動画に加え、引用ツイートの動画も「引用した側」の tweetId に
+  // 紐づける。引用された動画プレイヤーは外側 article 内に描画され、imagesave.js は
+  // article 先頭の status リンク（＝外側ツイートID）で動画を引くため、外側IDでも
+  // 引けるようにしておかないと「取得待ち」のまま保存できない。
+  // 引用元IDへの登録（再帰 walk が行う）も残すので、引用元を単独表示しても引ける。
+  function collectTweetVideos(root) {
+    const out = Object.create(null);
+    function add(id, urls) {
+      if (!id || !urls.length) return;
+      let arr = out[id];
+      if (!arr) arr = out[id] = [];
+      for (const u of urls) if (arr.indexOf(u) === -1) arr.push(u);
+    }
     (function walk(o) {
       if (!o || typeof o !== "object") return;
       const tw = unwrapTweet(o);
       const lg = tw && tw.legacy;
       if (lg && (tw.rest_id || lg.id_str)) {
-        const media =
-          (lg.extended_entities && lg.extended_entities.media) ||
-          (lg.entities && lg.entities.media);
-        if (Array.isArray(media)) {
-          const id = tw.rest_id || lg.id_str;
-          media.forEach((m) => {
-            if (
-              m &&
-              (m.type === "video" || m.type === "animated_gif") &&
-              m.video_info
-            ) {
-              const url = bestMp4Url(m.video_info.variants);
-              if (!url || !id) return;
-              // 1投稿に複数の動画/GIFがあるので、tweetId ごとに配列で貯める
-              let arr = videoMap.get(id);
-              if (!arr) {
-                arr = [];
-                videoMap.set(id, arr);
-                changed = true;
-                if (videoMap.size > VIDEO_MAP_MAX) {
-                  videoMap.delete(videoMap.keys().next().value);
-                }
-              }
-              if (arr.indexOf(url) === -1) {
-                arr.push(url);
-                changed = true;
-              }
-            }
-          });
-        }
+        const id = tw.rest_id || lg.id_str;
+        add(id, ownVideoUrls(tw));
+        const qtw = quotedTweetOf(tw);
+        if (qtw) add(id, ownVideoUrls(qtw));
       }
       for (const k in o) {
         const v = o[k];
         if (v && typeof v === "object") walk(v);
       }
     })(root);
+    return out;
+  }
+
+  function harvestMedia(root) {
+    const found = collectTweetVideos(root);
+    let changed = false;
+    for (const id in found) {
+      // 1投稿に複数の動画/GIFがあるので、tweetId ごとに配列で貯める
+      let arr = videoMap.get(id);
+      if (!arr) {
+        arr = [];
+        videoMap.set(id, arr);
+        changed = true;
+        if (videoMap.size > VIDEO_MAP_MAX) {
+          videoMap.delete(videoMap.keys().next().value);
+        }
+      }
+      for (const url of found[id]) {
+        if (arr.indexOf(url) === -1) {
+          arr.push(url);
+          changed = true;
+        }
+      }
+    }
     if (changed) {
       try {
         videoMapNode().textContent = JSON.stringify(Object.fromEntries(videoMap));
@@ -592,6 +631,9 @@
       tweetTextOf,
       unwrapTweet,
       bestMp4Url,
+      ownVideoUrls,
+      quotedTweetOf,
+      collectTweetVideos,
       itemContentIsBad,
       filterEntries,
       filterPayload,

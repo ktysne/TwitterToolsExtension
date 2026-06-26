@@ -12,6 +12,9 @@ const {
   tweetTextOf,
   unwrapTweet,
   bestMp4Url,
+  ownVideoUrls,
+  quotedTweetOf,
+  collectTweetVideos,
   itemContentIsBad,
   filterEntries,
   filterPayload,
@@ -186,6 +189,74 @@ test("bestMp4Url: twimg 以外のホストや非mp4は拾わない", () => {
   );
   assert.equal(bestMp4Url([]), null);
   assert.equal(bestMp4Url(null), null);
+});
+
+// ---- 動画URLの収集（動画保存機能）-----------------------------------------
+
+// 指定のmp4 URLを1本だけ持つ動画ツイートを作る
+function videoTweet({ id, url, type = "video" } = {}) {
+  return {
+    rest_id: id,
+    legacy: {
+      id_str: id,
+      extended_entities: {
+        media: [{ type, video_info: { variants: [{ content_type: "video/mp4", bitrate: 832, url }] } }],
+      },
+    },
+  };
+}
+
+test("ownVideoUrls: 自身の動画mp4だけを配列で返す（重複除去）", () => {
+  const tw = videoTweet({ id: "1", url: "https://video.twimg.com/a.mp4" });
+  // 同じURLの2本目を足しても重複は1つにまとまる
+  tw.legacy.extended_entities.media.push({
+    type: "video",
+    video_info: { variants: [{ content_type: "video/mp4", bitrate: 500, url: "https://video.twimg.com/a.mp4" }] },
+  });
+  assert.deepEqual(ownVideoUrls(tw), ["https://video.twimg.com/a.mp4"]);
+  // 動画を持たないツイートは空配列
+  assert.deepEqual(ownVideoUrls(tweetResult({ id: "9", text: "no media" })), []);
+  assert.deepEqual(ownVideoUrls(null), []);
+});
+
+test("quotedTweetOf: quoted_status_result を取り出し、可視性ラッパも剥がす", () => {
+  const inner = videoTweet({ id: "q", url: "https://video.twimg.com/q.mp4" });
+  const wrapped = { quoted_status_result: { result: { __typename: "TweetWithVisibilityResults", tweet: inner } } };
+  assert.equal(quotedTweetOf(wrapped), inner);
+  assert.equal(quotedTweetOf({ rest_id: "1" }), null);
+});
+
+test("collectTweetVideos: 通常の動画ツイートは自身のIDで引ける", () => {
+  const root = { data: { tweet_results: { result: videoTweet({ id: "111", url: "https://video.twimg.com/v.mp4" }) } } };
+  const map = collectTweetVideos(root);
+  assert.deepEqual(Object.keys(map), ["111"]);
+  assert.deepEqual(map["111"], ["https://video.twimg.com/v.mp4"]);
+});
+
+test("collectTweetVideos: 引用ツイートの動画は外側IDと引用元IDの両方で引ける", () => {
+  // 外側ツイート(200)は動画を持たず、引用元(300)が動画を持つ（報告された不具合の構造）
+  const outer = {
+    rest_id: "200",
+    legacy: { id_str: "200", full_text: "見て" },
+    quoted_status_result: { result: videoTweet({ id: "300", url: "https://video.twimg.com/quoted.mp4" }) },
+  };
+  const root = { data: { tweet_results: { result: outer } } };
+  const map = collectTweetVideos(root);
+  // 外側ID(200)で引ける = imagesave.js が article 先頭の status リンクで引ける
+  assert.deepEqual(map["200"], ["https://video.twimg.com/quoted.mp4"]);
+  // 引用元ID(300)でも従来通り引ける（引用元を単独表示したとき用）
+  assert.deepEqual(map["300"], ["https://video.twimg.com/quoted.mp4"]);
+});
+
+test("collectTweetVideos: 外側にも引用元にも動画があれば外側IDに両方まとまる", () => {
+  const outer = videoTweet({ id: "200", url: "https://video.twimg.com/outer.mp4" });
+  outer.quoted_status_result = { result: videoTweet({ id: "300", url: "https://video.twimg.com/quoted.mp4" }) };
+  const map = collectTweetVideos({ tweet_results: { result: outer } });
+  assert.deepEqual(map["200"], [
+    "https://video.twimg.com/outer.mp4",
+    "https://video.twimg.com/quoted.mp4",
+  ]);
+  assert.deepEqual(map["300"], ["https://video.twimg.com/quoted.mp4"]);
 });
 
 // ---- itemContentIsBad ------------------------------------------------------
