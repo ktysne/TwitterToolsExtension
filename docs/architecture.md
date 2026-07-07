@@ -25,6 +25,7 @@ ISOLATED world はページの `fetch` をフックできない。
 
 - `data-tte-enabled`：ブロック/ミュート除外フィルタのオン/オフ。
 - `data-tte-autoplay`：動画の自動再生停止のオン/オフ。
+- `data-tte-cleanlink`：コピーするリンクの追跡パラメータ除去のオン/オフ。
 - `data-tte-removed`：そのフレームで除外した投稿の累計件数。各フレームが個別に積算し、ポップアップはトップフレーム(frameId 0)の値を読む。
 
 設定は `bridge.js` が `chrome.storage` から読み、上記の属性へ書き込む。
@@ -39,7 +40,7 @@ ISOLATED world はページの `fetch` をフックできない。
 
 ## 各スクリプトの責務
 
-- `interceptor.js`：GraphQL のタイムライン系レスポンスから、ブロック/ミュート対象とワード/@id ミュートに一致する投稿を取り除く。動画のmp4 URLを集める。動画の自動再生を抑止する。
+- `interceptor.js`：GraphQL のタイムライン系レスポンスから、ブロック/ミュート対象とワード/@id ミュートに一致する投稿を取り除く。動画のmp4 URLを集める。動画の自動再生を抑止する。コピー時に、単一の X の URL から追跡パラメータ(`s` / `t` など)を取り除く(`copy` イベントと `navigator.clipboard.writeText` のフック)。
 - `bridge.js`：設定を data 属性へ、ミュートのルールを `__tteMuteRules` へ反映する。ポップアップからの件数問い合わせに答える。
 - `imagesave.js`：メディア投稿に保存ボタンを設置し、保存対象のURLを集めて `background.js` へ渡す。
 - `mutemenu.js`：投稿の ⋯ メニューに「拡張機能でミュート」項目を足し、クリックで著者の @id を `muteHandles` に追加/解除する。

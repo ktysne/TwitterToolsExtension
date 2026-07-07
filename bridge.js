@@ -5,6 +5,7 @@
  * このスクリプトが設定の橋渡しをする（共有DOMが通信路）:
  *   - enabled         → <html data-tte-enabled>    ブロック/ミュート除外フィルタ
  *   - disableAutoplay → <html data-tte-autoplay>   動画の自動再生停止
+ *   - cleanLink       → <html data-tte-cleanlink>  コピーするリンクの追跡パラメータ除去
  *   - wordMute / muteWords / muteRegexes / handleMute / muteHandles
  *                     → <div id="__tteMuteRules">  ワード・@id ミュートのルール(JSON)
  * また popup からの「このタブで何件除外した?」問い合わせに応答する。
@@ -15,6 +16,7 @@
   const DEFAULTS = {
     enabled: true,
     disableAutoplay: true,
+    cleanLink: true,
     wordMute: true,
     muteWords: [],
     muteRegexes: [],
@@ -31,6 +33,10 @@
       document.documentElement.setAttribute(
         "data-tte-autoplay",
         cfg.disableAutoplay ? "1" : "0"
+      );
+      document.documentElement.setAttribute(
+        "data-tte-cleanlink",
+        cfg.cleanLink ? "1" : "0"
       );
     } catch (_) {}
   }
@@ -78,6 +84,12 @@
       document.documentElement.setAttribute(
         "data-tte-autoplay",
         changes.disableAutoplay.newValue ? "1" : "0"
+      );
+    }
+    if (changes.cleanLink) {
+      document.documentElement.setAttribute(
+        "data-tte-cleanlink",
+        changes.cleanLink.newValue ? "1" : "0"
       );
     }
     // ミュート系の項目は相互に関係するので、変化があれば一括で読み直す

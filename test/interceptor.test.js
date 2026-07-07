@@ -18,6 +18,7 @@ const {
   itemContentIsBad,
   filterEntries,
   filterPayload,
+  cleanShareUrl,
 } = require("../interceptor.js");
 
 // ---- フィクスチャ ----------------------------------------------------------
@@ -388,4 +389,62 @@ test("filterPayload: 何も有効でないコンテキストなら除外しな�
   const removed = filterPayload(payload, ctx({ relOn: false, rules: RULES_OFF }));
   assert.equal(removed, 0);
   assert.equal(payload.instructions[0].entries.length, 1);
+});
+
+// ---- cleanShareUrl（コピーするリンクの追跡パラメータ除去） -----------------
+
+test("cleanShareUrl: X の共有 URL から s / t などの追跡パラメータを取り除く", () => {
+  assert.equal(
+    cleanShareUrl("https://x.com/KAGAYA_11949/status/2074491512004763714?s=20"),
+    "https://x.com/KAGAYA_11949/status/2074491512004763714"
+  );
+  // t（トークン）と s の併用
+  assert.equal(
+    cleanShareUrl("https://x.com/u/status/123?t=abcDEF&s=20"),
+    "https://x.com/u/status/123"
+  );
+  // ref_src / ref_url（埋め込み由来の追跡）も対象
+  assert.equal(
+    cleanShareUrl("https://twitter.com/u/status/123?ref_src=twsrc%5Etfw"),
+    "https://twitter.com/u/status/123"
+  );
+  // twitter.com / サブドメインも対象
+  assert.equal(
+    cleanShareUrl("https://mobile.twitter.com/u/status/9?s=09"),
+    "https://mobile.twitter.com/u/status/9"
+  );
+});
+
+test("cleanShareUrl: 追跡パラメータ以外は保持する", () => {
+  assert.equal(
+    cleanShareUrl("https://x.com/u/status/123?s=20&lang=ja"),
+    "https://x.com/u/status/123?lang=ja"
+  );
+  // 検索 URL の q / f は追跡パラメータではないので残す
+  assert.equal(
+    cleanShareUrl("https://x.com/search?q=cat&s=20&f=live"),
+    "https://x.com/search?q=cat&f=live"
+  );
+  // パスやフラグメントは保持する
+  assert.equal(
+    cleanShareUrl("https://x.com/u/status/123/photo/1?s=20"),
+    "https://x.com/u/status/123/photo/1"
+  );
+});
+
+test("cleanShareUrl: 対象外の入力は原文のまま返す（fail open）", () => {
+  const base = "https://x.com/u/status/123";
+  // 除去対象が無ければ原文そのまま（末尾に ? を足さない・正規化しない）
+  assert.equal(cleanShareUrl(base), base);
+  // 空白を含む（＝本文中の URL）は触らない
+  assert.equal(cleanShareUrl("見て " + base + "?s=20 これ"), "見て " + base + "?s=20 これ");
+  // X 以外のホストは触らない
+  assert.equal(cleanShareUrl("https://example.com/x?s=20"), "https://example.com/x?s=20");
+  // 紛らわしいホスト（notx.com）は対象にしない
+  assert.equal(cleanShareUrl("https://notx.com/u/status/1?s=20"), "https://notx.com/u/status/1?s=20");
+  // URL でない文字列・空・非文字列
+  assert.equal(cleanShareUrl("ただのテキスト"), "ただのテキスト");
+  assert.equal(cleanShareUrl(""), "");
+  assert.equal(cleanShareUrl(null), null);
+  assert.equal(cleanShareUrl(undefined), undefined);
 });

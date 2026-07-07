@@ -619,6 +619,124 @@
     };
   } catch (_) {}
 
+  // --- コピーするリンクの整形（追跡パラメータの除去） ---------------------
+  // X の「リンクをコピー」は隠し要素の URL を選択して document.execCommand("copy")
+  // でクリップボードへ書き込む（実機で確認）。コピーされる URL は
+  //   https://x.com/<user>/status/<id>?s=20
+  // のように共有元を示す追跡パラメータ（s / t など）が付く。
+  // ここで copy イベントを捕捉し、コピー対象が「単一の X の URL」なら、その追跡
+  // パラメータだけを取り除いてから書き込む（clipboardData を上書きする）。
+  // 併せて、将来 X が Async Clipboard API に移った場合に備えて
+  // navigator.clipboard.writeText もフックし、同じ整形を通す。
+  // ON/OFF は <html data-tte-cleanlink="1|0"> を見る（属性未設定でも既定ON）。
+
+  // X が共有リンクに付ける追跡用のクエリパラメータ。
+  const SHARE_PARAMS = ["s", "t", "ref_src", "ref_url", "cn", "refsrc"];
+
+  // クリップボードへ入る文字列が「単一の X の URL」のときだけ追跡パラメータを
+  // 取り除いて返す。本文・非 X の URL・空白を含む文字列・URL でないものは
+  // そのまま返す（fail open）。DOM に依存しない純粋関数なので単体テストできる。
+  function cleanShareUrl(text) {
+    if (typeof text !== "string") return text;
+    const trimmed = text.trim();
+    // 単一の URL のときだけ触る。本文中に URL を含むコピーを壊さないため、
+    // 空白を含む（＝複数トークン）文字列には手を付けない。
+    if (!trimmed || /\s/.test(trimmed)) return text;
+    let u;
+    try {
+      u = new URL(trimmed);
+    } catch (_) {
+      return text; // URL として解釈できなければそのまま
+    }
+    const host = u.hostname.toLowerCase();
+    const isX =
+      host === "x.com" ||
+      host.endsWith(".x.com") ||
+      host === "twitter.com" ||
+      host.endsWith(".twitter.com");
+    if (!isX) return text;
+    let changed = false;
+    for (const p of SHARE_PARAMS) {
+      if (u.searchParams.has(p)) {
+        u.searchParams.delete(p);
+        changed = true;
+      }
+    }
+    if (!changed) return text; // 除去対象が無ければ原文のまま（余計な正規化を避ける）
+    // searchParams が空になれば search も空になり、末尾に "?" は残らない。
+    return u.toString();
+  }
+
+  // ブラウザ実行時だけ動く副作用（copy フックと writeText フック）は、
+  // document / Clipboard が無い Node では実行しない。
+  if (typeof document !== "undefined") {
+    function cleanLinkEnabled() {
+      return document.documentElement.getAttribute("data-tte-cleanlink") !== "0";
+    }
+
+    // copy イベント時にコピー元の文字列を取り出す。
+    // X は隠し要素を選択して execCommand("copy") するため、コピー元は選択文字列に
+    // 現れる（実機で確認）。入力欄(input/textarea)からのコピーにも対応する。
+    function copySourceText() {
+      const ae = document.activeElement;
+      if (
+        ae &&
+        (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT") &&
+        typeof ae.value === "string"
+      ) {
+        const s = ae.selectionStart;
+        const e = ae.selectionEnd;
+        if (s != null && e != null && e > s) return ae.value.slice(s, e);
+        return ae.value;
+      }
+      try {
+        const sel = window.getSelection && window.getSelection();
+        if (sel) return String(sel.toString());
+      } catch (_) {}
+      return "";
+    }
+
+    try {
+      // capture フェーズで document 全体の copy を拾い、X の読み取りより先に
+      // clipboardData を差し替える。整形不要ならイベントに一切触れない。
+      document.addEventListener(
+        "copy",
+        (e) => {
+          try {
+            if (!cleanLinkEnabled()) return;
+            if (!e.clipboardData) return;
+            const src = copySourceText();
+            const cleaned = cleanShareUrl(src);
+            if (typeof cleaned === "string" && cleaned !== src) {
+              e.clipboardData.setData("text/plain", cleaned);
+              e.preventDefault();
+            }
+          } catch (_) {}
+        },
+        true
+      );
+    } catch (_) {}
+
+    // Async Clipboard API 経由（navigator.clipboard.writeText）のコピーにも
+    // 同じ整形を適用する。writeText は Clipboard.prototype 上にあるので、
+    // ページ本体の呼び出しごと差し替える。
+    try {
+      const ClipboardProto =
+        typeof Clipboard !== "undefined" ? Clipboard.prototype : null;
+      if (ClipboardProto && typeof ClipboardProto.writeText === "function") {
+        const origWriteText = ClipboardProto.writeText;
+        ClipboardProto.writeText = function (text) {
+          try {
+            if (cleanLinkEnabled() && typeof text === "string") {
+              return origWriteText.call(this, cleanShareUrl(text));
+            }
+          } catch (_) {}
+          return origWriteText.apply(this, arguments);
+        };
+      }
+    } catch (_) {}
+  }
+
   // Node（単体テスト）でのみ純粋関数を公開する。ブラウザでは module が
   // 未定義なので何もしない（content script の挙動は変わらない）。
   if (typeof module !== "undefined" && module.exports) {
@@ -637,6 +755,7 @@
       itemContentIsBad,
       filterEntries,
       filterPayload,
+      cleanShareUrl,
     };
   }
 })();
