@@ -686,8 +686,12 @@
       ) {
         const s = ae.selectionStart;
         const e = ae.selectionEnd;
+        // 選択があるときだけ選択範囲を返す。未選択（カーソルのみ）や選択位置を
+        // 取れない入力欄では、コピー対象は無いとみなして空文字を返す（素通し）。
+        // ここで全文を返すと、単一 URL が入った入力欄でカーソルを置いて Ctrl+C
+        // しただけで、本来コピーされない全文を拡張が書き込んでしまう。
         if (s != null && e != null && e > s) return ae.value.slice(s, e);
-        return ae.value;
+        return "";
       }
       try {
         const sel = window.getSelection && window.getSelection();
