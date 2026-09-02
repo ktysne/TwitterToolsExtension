@@ -156,6 +156,17 @@
     return links[0].parentElement;
   }
 
+  // background からの応答をボタンに出す文言に変える。
+  // skipped が無い旧形式の応答でも従来どおりの表示になる。
+  function resultLabel(resp) {
+    if (!resp || !resp.ok) return "保存失敗";
+    const started = resp.started || 0;
+    const skipped = resp.skipped || 0;
+    if (started > 0 && skipped > 0) return `✓ ${started}件(${skipped}件済)`;
+    if (started === 0 && skipped > 0) return "✓ 保存済み";
+    return `✓ ${started}件`;
+  }
+
   function makeButton(label, getItems, missText) {
     const btn = document.createElement("button");
     btn.className = "tte-saveall";
@@ -188,7 +199,7 @@
       chrome.runtime.sendMessage(
         { type: "tte-download-images", items },
         (resp) => {
-          restore(resp && resp.ok ? `✓ ${resp.started}件` : "保存失敗");
+          restore(resultLabel(resp));
         }
       );
     });
@@ -302,6 +313,6 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { sanitize, mediaIdOf, pickFormat, origImageUrl };
+    module.exports = { sanitize, mediaIdOf, pickFormat, origImageUrl, resultLabel };
   }
 })();
