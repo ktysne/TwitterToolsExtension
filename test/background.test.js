@@ -359,6 +359,46 @@ test("handleDownloadMessage: 発行に失敗したら予約を外して再試行
   assert.equal(deps.calls.length, 2);
 });
 
+test("handleDownloadMessage: 古い発行の失敗は新しい予約を消さない", async () => {
+  // 設定オフのときは同名でも続けて発行するため、同じファイル名の予約が二度起きる。
+  // 1件目の開始失敗による解除が2件目の予約まで消してしまうと、設定をオンに
+  // 戻した直後（履歴がまだ追いつかない間）に重複が発行されてしまう。
+  const deps = makeDeps({
+    getSkipExisting: async () => false,
+    download: (opts) => {
+      deps.calls.push(opts);
+      return deps.calls.length === 1
+        ? Promise.reject(new Error("start failed"))
+        : Promise.resolve(1);
+    },
+  });
+  const item = { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" };
+  await handleDownloadMessage(
+    { type: "tte-download-images", items: [item, item] },
+    SENDER,
+    deps
+  );
+  assert.equal(deps.calls.length, 2); // 設定オフなので2件とも発行される
+
+  // 1件目の reject の .catch が走るのを待つ
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+
+  // 設定をオンに戻す。履歴はまだ追いついていない想定
+  const third = await handleDownloadMessage(
+    { type: "tte-download-images", items: [item] },
+    SENDER,
+    makeDeps({
+      calls: deps.calls,
+      download: (opts) => deps.calls.push(opts),
+      getSkipExisting: async () => true,
+      fileExists: async () => false,
+    })
+  );
+  // 2件目の予約が生きているのでスキップされる
+  assert.deepEqual(third, { ok: true, started: 0, skipped: 1 });
+  assert.equal(deps.calls.length, 2);
+});
+
 test("handleDownloadMessage: 設定がオフなら予約があっても全件ダウンロードする", async () => {
   const msg = {
     type: "tte-download-images",

@@ -147,21 +147,26 @@ function currentSkipExisting() {
 // ダウンロードを発行し得る。また履歴に載るまでの間も検索では拾えない。
 // 予約は service worker の再起動で消えるが、その場合は履歴による判定に戻る
 // だけなので実害は無い。
-const pending = new Set();
+// 値はその予約を識別するトークン。同じファイル名で二度予約が起きたとき
+// （設定オフで同名を続けて発行した場合など）に、古い予約の解除や TTL が
+// 新しい予約まで消してしまわないよう、トークンが一致するときだけ外す。
+const pending = new Map();
 const PENDING_TTL_MS = 60000; // 予約が残り続けないようにする保持時間
 
-// ファイル名を予約し、一定時間で自動的に外す。
+// ファイル名を予約し、一定時間で自動的に外す。返したトークンは release に渡す。
 function reserve(filename) {
-  pending.add(filename);
-  const timer = setTimeout(() => pending.delete(filename), PENDING_TTL_MS);
+  const token = {};
+  pending.set(filename, token);
+  const timer = setTimeout(() => release(filename, token), PENDING_TTL_MS);
   // Node でのテスト時にタイマーがプロセスを引き止めないようにする
   if (timer && typeof timer.unref === "function") timer.unref();
+  return token;
 }
 
-// 予約を外す。ダウンロードの開始に失敗したときに使う。
+// 予約を外す。ダウンロードの開始に失敗したときと、TTL が切れたときに使う。
 // 予約を残したままにすると、TTL が切れるまで再試行が無言でスキップされる。
-function release(filename) {
-  pending.delete(filename);
+function release(filename, token) {
+  if (pending.get(filename) === token) pending.delete(filename);
 }
 
 // メッセージを受けて検証済みのダウンロードを開始する。
@@ -223,13 +228,13 @@ async function runDownload(msg, deps) {
       const ret = download({ url: t.url, filename: t.filename, saveAs: false });
       // 発行できたものだけ予約する。download() は同期で戻り、ここまでに
       // await を挟まないため、この順でも他のメッセージは割り込めない。
-      reserve(t.filename);
+      const token = reserve(t.filename);
       started++;
       // MV3 の chrome.downloads.download() はコールバック無しで呼ぶと Promise を
       // 返し、開始に失敗すると reject する。await はしない（応答を遅らせず、
       // reserve() との間に await を挟まないため）。
       if (ret && typeof ret.then === "function") {
-        ret.catch(() => release(t.filename));
+        ret.catch(() => release(t.filename, token));
       }
     } catch (_) {}
   }
