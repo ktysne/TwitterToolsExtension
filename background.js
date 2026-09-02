@@ -73,6 +73,9 @@ function escapeRegExp(s) {
 // 区切りは Windows の "\" と他OSの "/" の両方を許す。
 // state や exists でクエリを絞らないのは、ダウンロード中（in_progress）の記録も
 // 拾って完了前の再クリックによる重複保存を防ぐためで、判定は結果側で行う。
+// 件数の上限も設けない。上限を設けると、新しい順に並べた分がすべて中断・削除済みで、
+// それより古い記録に完了済みのものがある場合を見落とす。filenameRegex は絶対パスの
+// 末尾一致なので結果集合はもともと小さく、上限を設ける必要が無い。
 function existsQuery(filename) {
   const pattern =
     String(filename)
@@ -80,18 +83,21 @@ function existsQuery(filename) {
       .filter(Boolean)
       .map((seg) => "[\\\\/]" + escapeRegExp(seg))
       .join("") + "$";
-  return { filenameRegex: pattern, limit: 10, orderBy: ["-startTime"] };
+  return { filenameRegex: pattern };
 }
 
 // 検索結果に「保存済みと見なせる同名ファイル」があるか判定する。
 // ダウンロード中のものは exists を見ない（まだファイルが揃っていないため）。
-// 完了済みのものは、実在しないと分かっているもの（exists === false）だけ除く。
+// 完了済みのものは、実在すると分かっているもの（exists === true）だけをヒットとする。
+// 実在を確認できないものを「あり」と扱うと、ファイルが無いのに保存されず、利用者から
+// 見れば黙って失敗したことになる。「無し」と扱えば重複ファイルができるだけなので、
+// こちらのほうが害が小さい。
 function hasSameFile(items) {
   if (!Array.isArray(items)) return false;
   return items.some((item) => {
     if (!item) return false;
     if (item.state === "in_progress") return true;
-    return item.state === "complete" && item.exists !== false;
+    return item.state === "complete" && item.exists === true;
   });
 }
 
@@ -152,6 +158,12 @@ function reserve(filename) {
   if (timer && typeof timer.unref === "function") timer.unref();
 }
 
+// 予約を外す。ダウンロードの開始に失敗したときに使う。
+// 予約を残したままにすると、TTL が切れるまで再試行が無言でスキップされる。
+function release(filename) {
+  pending.delete(filename);
+}
+
 // メッセージを受けて検証済みのダウンロードを開始する。
 // 依存（download / fileExists / getSkipExisting）は呼び出し側から差し込める
 // ようにして、ロジックを単体テストできるようにしてある。
@@ -198,13 +210,27 @@ async function runDownload(msg, deps) {
         skipped++;
         continue;
       }
+      // 予約は2回確認する。1回目（上）は無駄な検索を省くため、2回目（ここ）は
+      // 存在確認の await を待つ間に別のメッセージが同じファイル名を予約した場合を
+      // 拾うため。この再確認から download() と reserve() までは await を挟まないので、
+      // 同じファイル名の発行は1件に収まる。
+      if (pending.has(t.filename)) {
+        skipped++;
+        continue;
+      }
     }
     try {
-      download({ url: t.url, filename: t.filename, saveAs: false });
+      const ret = download({ url: t.url, filename: t.filename, saveAs: false });
       // 発行できたものだけ予約する。download() は同期で戻り、ここまでに
       // await を挟まないため、この順でも他のメッセージは割り込めない。
       reserve(t.filename);
       started++;
+      // MV3 の chrome.downloads.download() はコールバック無しで呼ぶと Promise を
+      // 返し、開始に失敗すると reject する。await はしない（応答を遅らせず、
+      // reserve() との間に await を挟まないため）。
+      if (ret && typeof ret.then === "function") {
+        ret.catch(() => release(t.filename));
+      }
     } catch (_) {}
   }
   return { ok: true, started, skipped };

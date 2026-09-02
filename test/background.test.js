@@ -88,11 +88,11 @@ test("fromTwitter: 別オリジンや不正値は拒否", () => {
 test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切りを許す", () => {
   const q = existsQuery("TwitterMedia/a.jpg");
   assert.equal(q.filenameRegex, "[\\\\/]TwitterMedia[\\\\/]a\\.jpg$");
-  assert.equal(q.limit, 10);
-  assert.deepEqual(q.orderBy, ["-startTime"]);
-  // 判定は結果側で行うため、state / exists では絞らない
+  // 判定は結果側で行うため state / exists では絞らず、見落としを防ぐため件数も絞らない
+  assert.deepEqual(Object.keys(q), ["filenameRegex"]);
   assert.equal("state" in q, false);
   assert.equal("exists" in q, false);
+  assert.equal("limit" in q, false);
 
   const re = new RegExp(q.filenameRegex);
   assert.equal(re.test("C:\\Users\\x\\Downloads\\TwitterMedia\\a.jpg"), true);
@@ -107,11 +107,11 @@ test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切�
 test("hasSameFile: ダウンロード中と、完了済みで実在するものをヒットとする", () => {
   assert.equal(hasSameFile([{ state: "in_progress" }]), true); // 完了前でもヒット
   assert.equal(hasSameFile([{ state: "complete", exists: true }]), true);
-  assert.equal(hasSameFile([{ state: "complete" }]), true); // exists 不明はヒット扱い
 });
 
-test("hasSameFile: 実在しない完了済み・中断・空・非配列はヒットしない", () => {
+test("hasSameFile: 実在を確認できない完了済み・中断・空・非配列はヒットしない", () => {
   assert.equal(hasSameFile([{ state: "complete", exists: false }]), false);
+  assert.equal(hasSameFile([{ state: "complete" }]), false); // exists 不明はヒットしない
   assert.equal(hasSameFile([{ state: "interrupted" }]), false);
   assert.equal(hasSameFile([{ state: "interrupted", exists: true }]), false);
   assert.equal(hasSameFile([]), false);
@@ -303,6 +303,60 @@ test("handleDownloadMessage: 同一メッセージ内の同名ファイルは1�
   );
   assert.deepEqual(resp, { ok: true, started: 1, skipped: 1 });
   assert.equal(deps.calls.length, 1);
+});
+
+test("handleDownloadMessage: 並行するメッセージでも同名は1件だけ発行する", async () => {
+  // 存在確認の解決を後から行えるようにして、await の待ち時間に別のメッセージが
+  // 同じ判定を通る状況を作る
+  let resolveExists;
+  const gate = new Promise((resolve) => {
+    resolveExists = resolve;
+  });
+  const deps = makeDeps({
+    getSkipExisting: async () => true,
+    fileExists: () => gate.then(() => false),
+  });
+  const msg = {
+    type: "tte-download-images",
+    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
+  };
+
+  const first = handleDownloadMessage(msg, SENDER, deps);
+  const second = handleDownloadMessage(msg, SENDER, deps);
+  resolveExists();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(deps.calls.length, 1); // 発行は1件だけ
+  assert.equal(a.started + b.started, 1);
+  assert.equal(a.skipped + b.skipped, 1);
+});
+
+test("handleDownloadMessage: 発行に失敗したら予約を外して再試行できる", async () => {
+  const deps = makeDeps({
+    getSkipExisting: async () => true,
+    fileExists: async () => false,
+    download: (opts) => {
+      deps.calls.push(opts);
+      // 1回目だけ開始に失敗する（MV3 の download() は reject する Promise を返す）
+      return deps.calls.length === 1
+        ? Promise.reject(new Error("start failed"))
+        : Promise.resolve(1);
+    },
+  });
+  const msg = {
+    type: "tte-download-images",
+    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
+  };
+
+  const first = await handleDownloadMessage(msg, SENDER, deps);
+  assert.deepEqual(first, { ok: true, started: 1, skipped: 0 });
+
+  // .catch はマイクロタスクで走るため、予約が外れるまで少し待つ
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+
+  const second = await handleDownloadMessage(msg, SENDER, deps);
+  assert.deepEqual(second, { ok: true, started: 1, skipped: 0 }); // スキップされない
+  assert.equal(deps.calls.length, 2);
 });
 
 test("handleDownloadMessage: 設定がオフなら予約があっても全件ダウンロードする", async () => {
