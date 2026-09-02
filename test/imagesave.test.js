@@ -3,7 +3,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { sanitize, mediaIdOf, pickFormat, origImageUrl } = require("../imagesave.js");
+const {
+  sanitize,
+  mediaIdOf,
+  pickFormat,
+  origImageUrl,
+  resultLabel,
+} = require("../imagesave.js");
 
 test("sanitize: ファイル名に使えない文字を _ に置き換え、60文字に切る", () => {
   assert.equal(sanitize("alice"), "alice");
@@ -36,4 +42,19 @@ test("origImageUrl: name=orig の原寸URLを組み立てる", () => {
     origImageUrl("AbC123", "png"),
     "https://pbs.twimg.com/media/AbC123?format=png&name=orig"
   );
+});
+
+test("resultLabel: 保存件数とスキップ件数をボタンの文言にする", () => {
+  assert.equal(resultLabel({ ok: true, started: 2, skipped: 1 }), "✓ 2件(1件済)");
+  assert.equal(resultLabel({ ok: true, started: 0, skipped: 3 }), "✓ 保存済み");
+  assert.equal(resultLabel({ ok: true, started: 4, skipped: 0 }), "✓ 4件");
+  assert.equal(resultLabel({ ok: true, started: 0, skipped: 0 }), "✓ 0件");
+});
+
+test("resultLabel: 応答が無い・失敗・旧形式でも壊れない", () => {
+  assert.equal(resultLabel(null), "保存失敗");
+  assert.equal(resultLabel(undefined), "保存失敗");
+  assert.equal(resultLabel({ ok: false, started: 0 }), "保存失敗");
+  // skipped が無い旧形式の応答は従来どおりの表示
+  assert.equal(resultLabel({ ok: true, started: 3 }), "✓ 3件");
 });

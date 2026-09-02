@@ -5,6 +5,7 @@ const TOGGLES = {
   enabled: true,
   disableAutoplay: true,
   imageSave: true,
+  skipExisting: true,
   cleanLink: true,
   wordMute: true,
   handleMute: true,

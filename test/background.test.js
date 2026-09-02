@@ -3,7 +3,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { safeUrl, safeFilename, fromTwitter, handleDownloadMessage } = require("../background.js");
+const {
+  safeUrl,
+  safeFilename,
+  fromTwitter,
+  existsQuery,
+  makeFileExists,
+  handleDownloadMessage,
+} = require("../background.js");
 
 // ---- safeUrl ---------------------------------------------------------------
 
@@ -70,13 +77,61 @@ test("fromTwitter: 別オリジンや不正値は拒否", () => {
   assert.equal(fromTwitter({}), false);
 });
 
+// ---- existsQuery -----------------------------------------------------------
+
+test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切りを許す", () => {
+  const q = existsQuery("TwitterMedia/a.jpg");
+  assert.equal(q.filenameRegex, "[\\\\/]TwitterMedia[\\\\/]a\\.jpg$");
+  assert.equal(q.exists, true);
+  assert.equal(q.state, "complete");
+  assert.equal(q.limit, 1);
+
+  const re = new RegExp(q.filenameRegex);
+  assert.equal(re.test("C:\\Users\\x\\Downloads\\TwitterMedia\\a.jpg"), true);
+  assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg"), true);
+  assert.equal(re.test("/home/x/Downloads/TwitterMedia/aXjpg"), false); // . はメタ文字でない
+  assert.equal(re.test("/home/x/Downloads/Other/a.jpg"), false); // 別フォルダ
+  assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg.bak"), false); // 末尾一致
+});
+
+// ---- makeFileExists --------------------------------------------------------
+
+test("makeFileExists: 検索結果があれば true、無ければ false", async () => {
+  const hit = makeFileExists((q, cb) => cb([{ id: 1 }]));
+  assert.equal(await hit("TwitterMedia/a.jpg"), true);
+
+  const miss = makeFileExists((q, cb) => cb([]));
+  assert.equal(await miss("TwitterMedia/a.jpg"), false);
+});
+
+test("makeFileExists: search が例外を投げたら false（DLを止めない）", async () => {
+  const boom = makeFileExists(() => {
+    throw new Error("boom");
+  });
+  assert.equal(await boom("TwitterMedia/a.jpg"), false);
+});
+
 // ---- handleDownloadMessage -------------------------------------------------
 
 const SENDER = { url: "https://x.com/search" };
 
-test("handleDownloadMessage: 検証を通った項目だけダウンロードする", () => {
+// 既定の deps。個別テストで必要な部分だけ差し替える。
+function makeDeps(over) {
   const calls = [];
-  const resp = handleDownloadMessage(
+  return Object.assign(
+    {
+      calls,
+      download: (opts) => calls.push(opts),
+      fileExists: async () => false,
+      getSkipExisting: async () => false,
+    },
+    over || {}
+  );
+}
+
+test("handleDownloadMessage: 検証を通った項目だけダウンロードする", async () => {
+  const deps = makeDeps();
+  const resp = await handleDownloadMessage(
     {
       type: "tte-download-images",
       items: [
@@ -86,46 +141,111 @@ test("handleDownloadMessage: 検証を通った項目だけダウンロードす
       ],
     },
     SENDER,
-    (opts) => calls.push(opts)
+    deps
   );
-  assert.deepEqual(resp, { ok: true, started: 1 });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].filename, "TwitterMedia/alice_1_1.jpg");
-  assert.equal(calls[0].saveAs, false);
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 0 });
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0].filename, "TwitterMedia/alice_1_1.jpg");
+  assert.equal(deps.calls[0].saveAs, false);
 });
 
-test("handleDownloadMessage: Twitter 以外の送信元は拒否", () => {
-  const calls = [];
-  const resp = handleDownloadMessage(
+test("handleDownloadMessage: Twitter 以外の送信元は拒否", async () => {
+  const deps = makeDeps();
+  const resp = await handleDownloadMessage(
     { type: "tte-download-images", items: [{ url: "https://pbs.twimg.com/media/a", filename: "x.jpg" }] },
     { url: "https://evil.com/x" },
-    (opts) => calls.push(opts)
+    deps
   );
-  assert.deepEqual(resp, { ok: false, started: 0 });
-  assert.equal(calls.length, 0);
+  assert.deepEqual(resp, { ok: false, started: 0, skipped: 0 });
+  assert.equal(deps.calls.length, 0);
 });
 
 test("handleDownloadMessage: 無関係なメッセージは null（応答しない）", () => {
-  assert.equal(handleDownloadMessage({ type: "other" }, SENDER, () => {}), null);
-  assert.equal(handleDownloadMessage(null, SENDER, () => {}), null);
+  // 同期で null を返す（Promise でないこと）
+  assert.equal(handleDownloadMessage({ type: "other" }, SENDER, makeDeps()), null);
+  assert.equal(handleDownloadMessage(null, SENDER, makeDeps()), null);
   assert.equal(
-    handleDownloadMessage({ type: "tte-download-images", items: "nope" }, SENDER, () => {}),
+    handleDownloadMessage({ type: "tte-download-images", items: "nope" }, SENDER, makeDeps()),
     null
   );
 });
 
-test("handleDownloadMessage: 最大件数を超える分は切り捨てる", () => {
+test("handleDownloadMessage: 最大件数を超える分は切り捨てる", async () => {
   const items = Array.from({ length: 50 }, (_, i) => ({
     url: "https://pbs.twimg.com/media/" + i,
     filename: "a_" + i + ".jpg",
   }));
-  const calls = [];
-  const resp = handleDownloadMessage(
-    { type: "tte-download-images", items },
-    SENDER,
-    (opts) => calls.push(opts)
-  );
+  const deps = makeDeps();
+  const resp = await handleDownloadMessage({ type: "tte-download-images", items }, SENDER, deps);
   assert.equal(resp.ok, true);
   assert.equal(resp.started, 30); // MAX_ITEMS
-  assert.equal(calls.length, 30);
+  assert.equal(deps.calls.length, 30);
+});
+
+test("handleDownloadMessage: 同名ファイルがある項目はスキップする", async () => {
+  const deps = makeDeps({
+    getSkipExisting: async () => true,
+    fileExists: async (filename) => filename === "TwitterMedia/a.jpg",
+  });
+  const resp = await handleDownloadMessage(
+    {
+      type: "tte-download-images",
+      items: [
+        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }, // 既にある → スキップ
+        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
+      ],
+    },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1 });
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0].filename, "TwitterMedia/b.jpg");
+});
+
+test("handleDownloadMessage: 設定がオフなら同名でも全件ダウンロードする", async () => {
+  let existsCalls = 0;
+  const deps = makeDeps({
+    getSkipExisting: async () => false,
+    fileExists: async () => {
+      existsCalls++;
+      return true;
+    },
+  });
+  const resp = await handleDownloadMessage(
+    {
+      type: "tte-download-images",
+      items: [
+        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
+        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
+      ],
+    },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(resp, { ok: true, started: 2, skipped: 0 });
+  assert.equal(existsCalls, 0); // 設定オフなら存在確認そのものを行わない
+});
+
+test("handleDownloadMessage: 設定の読み出しは1メッセージにつき1回だけ", async () => {
+  let getCalls = 0;
+  const deps = makeDeps({
+    getSkipExisting: async () => {
+      getCalls++;
+      return true;
+    },
+  });
+  await handleDownloadMessage(
+    {
+      type: "tte-download-images",
+      items: [
+        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
+        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
+        { url: "https://pbs.twimg.com/media/c", filename: "c.jpg" },
+      ],
+    },
+    SENDER,
+    deps
+  );
+  assert.equal(getCalls, 1);
 });

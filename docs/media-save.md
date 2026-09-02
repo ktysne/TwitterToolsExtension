@@ -76,6 +76,21 @@ tweet.legacy.extended_entities.media[]
 
 アカウントと tweetId は、投稿内の `a[href*="/status/"]` のパスから取り出す。
 
+## 同名ファイルのスキップ
+
+設定 `skipExisting`（`chrome.storage.local`、既定 `true`）がオンのとき、保存先に同名のファイルがある項目はダウンロードを発行しない。
+
+`chrome.downloads.download` の `conflictAction` には「スキップ」にあたる値が無い。
+そこで `chrome.downloads.search` でダウンロード履歴を引き、完了済み（`state: "complete"`）かつファイルが実在する（`exists: true`）同名の記録があれば保存済みと見なす。
+`filenameRegex` は絶対パス全体に対する部分一致なので、`[\\/]TwitterMedia[\\/]<ファイル名>$` の形で末尾一致を見る（区切りは Windows の `\` と他OSの `/` の両方を許す）。
+
+設定がオフのときは従来どおり、Chrome の既定動作（`uniquify`）で `名前 (1).jpg` のように別名保存される。
+
+制約は次のとおり。
+
+- 判定はダウンロード履歴に基づくため、履歴を消した場合や、この拡張機能以外の手段で保存したファイルは検出できない。
+- `exists` の情報は Chrome が随時監視しているわけではないため、ファイルを消した直後は古い値が返り、保存されずにスキップされることがある。
+
 ## 既知の制約
 
 動画URLは、その投稿を含むレスポンスを `interceptor.js` が見た後に引ける。
