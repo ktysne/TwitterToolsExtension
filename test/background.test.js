@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const { beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
@@ -8,9 +9,14 @@ const {
   safeFilename,
   fromTwitter,
   existsQuery,
+  hasSameFile,
   makeFileExists,
   handleDownloadMessage,
+  _resetPending,
 } = require("../background.js");
+
+// 予約（pending）はモジュールスコープに持つため、テスト間で持ち越さない
+beforeEach(() => _resetPending());
 
 // ---- safeUrl ---------------------------------------------------------------
 
@@ -82,9 +88,11 @@ test("fromTwitter: 別オリジンや不正値は拒否", () => {
 test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切りを許す", () => {
   const q = existsQuery("TwitterMedia/a.jpg");
   assert.equal(q.filenameRegex, "[\\\\/]TwitterMedia[\\\\/]a\\.jpg$");
-  assert.equal(q.exists, true);
-  assert.equal(q.state, "complete");
-  assert.equal(q.limit, 1);
+  assert.equal(q.limit, 10);
+  assert.deepEqual(q.orderBy, ["-startTime"]);
+  // 判定は結果側で行うため、state / exists では絞らない
+  assert.equal("state" in q, false);
+  assert.equal("exists" in q, false);
 
   const re = new RegExp(q.filenameRegex);
   assert.equal(re.test("C:\\Users\\x\\Downloads\\TwitterMedia\\a.jpg"), true);
@@ -94,11 +102,42 @@ test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切�
   assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg.bak"), false); // 末尾一致
 });
 
+// ---- hasSameFile -----------------------------------------------------------
+
+test("hasSameFile: ダウンロード中と、完了済みで実在するものをヒットとする", () => {
+  assert.equal(hasSameFile([{ state: "in_progress" }]), true); // 完了前でもヒット
+  assert.equal(hasSameFile([{ state: "complete", exists: true }]), true);
+  assert.equal(hasSameFile([{ state: "complete" }]), true); // exists 不明はヒット扱い
+});
+
+test("hasSameFile: 実在しない完了済み・中断・空・非配列はヒットしない", () => {
+  assert.equal(hasSameFile([{ state: "complete", exists: false }]), false);
+  assert.equal(hasSameFile([{ state: "interrupted" }]), false);
+  assert.equal(hasSameFile([{ state: "interrupted", exists: true }]), false);
+  assert.equal(hasSameFile([]), false);
+  assert.equal(hasSameFile(null), false);
+  assert.equal(hasSameFile(undefined), false);
+  assert.equal(hasSameFile("nope"), false);
+});
+
+test("hasSameFile: 1件でもヒットすれば true", () => {
+  assert.equal(
+    hasSameFile([{ state: "interrupted" }, { state: "complete", exists: true }]),
+    true
+  );
+});
+
 // ---- makeFileExists --------------------------------------------------------
 
-test("makeFileExists: 検索結果があれば true、無ければ false", async () => {
-  const hit = makeFileExists((q, cb) => cb([{ id: 1 }]));
+test("makeFileExists: 保存済みと見なせる結果があれば true、無ければ false", async () => {
+  const hit = makeFileExists((q, cb) => cb([{ state: "complete", exists: true }]));
   assert.equal(await hit("TwitterMedia/a.jpg"), true);
+
+  const running = makeFileExists((q, cb) => cb([{ state: "in_progress" }]));
+  assert.equal(await running("TwitterMedia/a.jpg"), true);
+
+  const gone = makeFileExists((q, cb) => cb([{ state: "complete", exists: false }]));
+  assert.equal(await gone("TwitterMedia/a.jpg"), false);
 
   const miss = makeFileExists((q, cb) => cb([]));
   assert.equal(await miss("TwitterMedia/a.jpg"), false);
@@ -225,6 +264,58 @@ test("handleDownloadMessage: 設定がオフなら同名でも全件ダウンロ
   );
   assert.deepEqual(resp, { ok: true, started: 2, skipped: 0 });
   assert.equal(existsCalls, 0); // 設定オフなら存在確認そのものを行わない
+});
+
+test("handleDownloadMessage: 予約済みのファイル名は履歴に無くてもスキップする", async () => {
+  const msg = {
+    type: "tte-download-images",
+    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
+  };
+  // 履歴には出ない（＝発行直後で検索に載らない）状況を模す
+  const deps = makeDeps({
+    getSkipExisting: async () => true,
+    fileExists: async () => false,
+  });
+
+  const first = await handleDownloadMessage(msg, SENDER, deps);
+  assert.deepEqual(first, { ok: true, started: 1, skipped: 0 });
+
+  const second = await handleDownloadMessage(msg, SENDER, deps);
+  assert.deepEqual(second, { ok: true, started: 0, skipped: 1 });
+  assert.equal(deps.calls.length, 1); // 2通目は発行しない
+});
+
+test("handleDownloadMessage: 同一メッセージ内の同名ファイルは1件だけ発行する", async () => {
+  const deps = makeDeps({
+    getSkipExisting: async () => true,
+    fileExists: async () => false,
+  });
+  const resp = await handleDownloadMessage(
+    {
+      type: "tte-download-images",
+      items: [
+        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
+        { url: "https://pbs.twimg.com/media/a2", filename: "a.jpg" },
+      ],
+    },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1 });
+  assert.equal(deps.calls.length, 1);
+});
+
+test("handleDownloadMessage: 設定がオフなら予約があっても全件ダウンロードする", async () => {
+  const msg = {
+    type: "tte-download-images",
+    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
+  };
+  const deps = makeDeps({ getSkipExisting: async () => false });
+
+  await handleDownloadMessage(msg, SENDER, deps); // 1通目で予約される
+  const second = await handleDownloadMessage(msg, SENDER, deps);
+  assert.deepEqual(second, { ok: true, started: 1, skipped: 0 });
+  assert.equal(deps.calls.length, 2);
 });
 
 test("handleDownloadMessage: 設定の読み出しは1メッセージにつき1回だけ", async () => {

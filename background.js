@@ -12,7 +12,8 @@
  * 設定 skipExisting（既定オン）がオンのときは、保存先に同名ファイルが既に
  * ある項目のダウンロードを発行しない。chrome.downloads にはスキップ用の
  * conflictAction が無いため、chrome.downloads.search でダウンロード履歴を
- * 引き、完了済みかつ実在する同名ファイルがあるかで判定する。
+ * 引き、ダウンロード中または完了済みで実在する同名ファイルがあるかで判定する。
+ * 履歴に載る前の重複は、発行予定のファイル名をメモリ上に予約して防ぐ。
  */
 "use strict";
 
@@ -70,6 +71,8 @@ function escapeRegExp(s) {
 // 同名ファイルの有無を調べる chrome.downloads.search 用のクエリを組み立てる。
 // filenameRegex は絶対パス全体に対する部分一致なので末尾一致で判定する。
 // 区切りは Windows の "\" と他OSの "/" の両方を許す。
+// state や exists でクエリを絞らないのは、ダウンロード中（in_progress）の記録も
+// 拾って完了前の再クリックによる重複保存を防ぐためで、判定は結果側で行う。
 function existsQuery(filename) {
   const pattern =
     String(filename)
@@ -77,7 +80,19 @@ function existsQuery(filename) {
       .filter(Boolean)
       .map((seg) => "[\\\\/]" + escapeRegExp(seg))
       .join("") + "$";
-  return { filenameRegex: pattern, exists: true, state: "complete", limit: 1 };
+  return { filenameRegex: pattern, limit: 10, orderBy: ["-startTime"] };
+}
+
+// 検索結果に「保存済みと見なせる同名ファイル」があるか判定する。
+// ダウンロード中のものは exists を見ない（まだファイルが揃っていないため）。
+// 完了済みのものは、実在しないと分かっているもの（exists === false）だけ除く。
+function hasSameFile(items) {
+  if (!Array.isArray(items)) return false;
+  return items.some((item) => {
+    if (!item) return false;
+    if (item.state === "in_progress") return true;
+    return item.state === "complete" && item.exists !== false;
+  });
 }
 
 // chrome.downloads.search 相当の関数から、同名ファイルの有無を返す関数を作る。
@@ -95,7 +110,7 @@ function makeFileExists(search) {
             resolve(false);
             return;
           }
-          resolve(Array.isArray(items) && items.length > 0);
+          resolve(hasSameFile(items));
         });
       } catch (_) {
         resolve(false);
@@ -119,6 +134,22 @@ function currentSkipExisting() {
       resolve(true);
     }
   });
+}
+
+// 発行済み（発行直前を含む）のファイル名の予約。
+// 存在確認は非同期なので、その待ち時間に別のメッセージが同じファイル名の
+// ダウンロードを発行し得る。また履歴に載るまでの間も検索では拾えない。
+// 予約は service worker の再起動で消えるが、その場合は履歴による判定に戻る
+// だけなので実害は無い。
+const pending = new Set();
+const PENDING_TTL_MS = 60000; // 予約が残り続けないようにする保持時間
+
+// ファイル名を予約し、一定時間で自動的に外す。
+function reserve(filename) {
+  pending.add(filename);
+  const timer = setTimeout(() => pending.delete(filename), PENDING_TTL_MS);
+  // Node でのテスト時にタイマーがプロセスを引き止めないようにする
+  if (timer && typeof timer.unref === "function") timer.unref();
 }
 
 // メッセージを受けて検証済みのダウンロードを開始する。
@@ -157,14 +188,22 @@ async function runDownload(msg, deps) {
   let started = 0;
   let skipped = 0;
   for (const t of targets) {
-    if (skipExisting && typeof fileExists === "function") {
-      if (await fileExists(t.filename)) {
+    if (skipExisting) {
+      // 予約済みなら検索を待たずにスキップする（同一メッセージ内・メッセージ間の重複発行を防ぐ）
+      if (pending.has(t.filename)) {
+        skipped++;
+        continue;
+      }
+      if (typeof fileExists === "function" && (await fileExists(t.filename))) {
         skipped++;
         continue;
       }
     }
     try {
       download({ url: t.url, filename: t.filename, saveAs: false });
+      // 発行できたものだけ予約する。download() は同期で戻り、ここまでに
+      // await を挟まないため、この順でも他のメッセージは割り込めない。
+      reserve(t.filename);
       started++;
     } catch (_) {}
   }
@@ -194,7 +233,9 @@ if (typeof module !== "undefined" && module.exports) {
     fromTwitter,
     escapeRegExp,
     existsQuery,
+    hasSameFile,
     makeFileExists,
     handleDownloadMessage,
+    _resetPending: () => pending.clear(), // テストで予約状態を初期化するため
   };
 }
