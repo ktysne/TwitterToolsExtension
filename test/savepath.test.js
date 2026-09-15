@@ -37,10 +37,19 @@ test("isSafeComponent: 先頭末尾の空白・ドット・チルダとドット
 });
 
 test("isSafeComponent: Windows の予約名と危険な拡張子を拒否する", () => {
-  for (const value of ["con", "CON.txt", "com1", "clock$", "desktop.ini", "thumbs.db"]) {
+  for (const value of [
+    "con",
+    "CON.txt",
+    "com1",
+    "clock$",
+    "desktop.ini",
+    "thumbs.db",
+    "conin$",
+    "CONOUT$",
+  ]) {
     assert.equal(isSafeComponent(value), false, value);
   }
-  for (const value of ["x.lnk", "x.LOCAL", "x.{abc}"]) {
+  for (const value of ["x.lnk", "x.LOCAL", "x.scf", "x.URL", "x.{abc}"]) {
     assert.equal(isSafeComponent(value), false, value);
   }
   assert.equal(isSafeComponent(123), false);
@@ -84,17 +93,17 @@ test("validateSaveDir: 最初に見つかった禁止規則の文言を返す", 
     ok: false,
     message: '使えない文字「制御文字」が含まれています。',
   });
-  for (const raw of [
-    "a/ folder",
-    "a/folder /b",
-    "a/.folder",
-    "a/folder.",
-    "a/~folder",
-    "a/folder~",
-  ]) {
+  for (const raw of ["a/ folder", "a/folder /b", "a/.folder", "a/folder."]) {
     assert.deepEqual(validateSaveDir(raw), {
       ok: false,
-      message: "フォルダ名の先頭と末尾に空白・「.」・「~」は使えません。",
+      message: "フォルダ名の先頭と末尾に空白・「.」は使えません。",
+    });
+  }
+  // Windows の短い名前と紛らわしい名前を Chrome が拒否するため、「~」は位置を問わず使えない
+  for (const raw of ["my~pics", "a/~folder", "a/folder~"]) {
+    assert.deepEqual(validateSaveDir(raw), {
+      ok: false,
+      message: "フォルダ名に「~」は使えません。",
     });
   }
   assert.deepEqual(validateSaveDir("con"), {
@@ -104,6 +113,14 @@ test("validateSaveDir: 最初に見つかった禁止規則の文言を返す", 
   assert.deepEqual(validateSaveDir("x.lnk"), {
     ok: false,
     message: "「x.lnk」は末尾が .lnk や .local などのため使えません。",
+  });
+  assert.deepEqual(validateSaveDir("archive.url"), {
+    ok: false,
+    message: "「archive.url」は末尾が .lnk や .local などのため使えません。",
+  });
+  assert.deepEqual(validateSaveDir("conin$"), {
+    ok: false,
+    message: "「conin$」は Windows で予約された名前のため使えません。",
   });
   assert.deepEqual(validateSaveDir("x".repeat(101)), {
     ok: false,
