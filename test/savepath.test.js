@@ -93,19 +93,29 @@ test("validateSaveDir: 最初に見つかった禁止規則の文言を返す", 
     ok: false,
     message: '使えない文字「制御文字」が含まれています。',
   });
-  for (const raw of ["a/ folder", "a/folder /b", "a/.folder", "a/folder."]) {
+  for (const raw of [
+    "a/ folder",
+    "a/folder /b",
+    "a/.folder",
+    "a/folder.",
+    "a/long-folder-name~",
+  ]) {
     assert.deepEqual(validateSaveDir(raw), {
       ok: false,
-      message: "フォルダ名の先頭と末尾に空白・「.」は使えません。",
+      message: "フォルダ名の先頭と末尾に空白・「.」・「~」は使えません。",
     });
   }
-  // Windows の短い名前と紛らわしい名前を Chrome が拒否するため、「~」は位置を問わず使えない
+  // Windows の短い名前と紛らわしい名前を Chrome が拒否するため、12 文字以下の名前では「~」を使えない
   for (const raw of ["my~pics", "a/~folder", "a/folder~"]) {
     assert.deepEqual(validateSaveDir(raw), {
       ok: false,
-      message: "フォルダ名に「~」は使えません。",
+      message: "12 文字以下のフォルダ名には「~」を使えません。",
     });
   }
+  assert.deepEqual(validateSaveDir("backup~2026-archive"), {
+    ok: true,
+    dir: "backup~2026-archive",
+  });
   assert.deepEqual(validateSaveDir("con"), {
     ok: false,
     message: "「con」は Windows で予約された名前のため使えません。",

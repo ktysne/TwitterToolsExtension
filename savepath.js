@@ -136,14 +136,17 @@
       const invalidMessage = forbiddenMessage(segment);
       if (invalidMessage) return { ok: false, message: invalidMessage };
       // Chrome は Windows で、短い名前（8.3 形式）と紛らわしい「~ を含む 12 文字以下の名前」を
-      // 拒否する。フォルダ名は短くなりやすいので、位置を問わず「~」を使えなくする。
-      if (segment.includes("~")) {
-        return { ok: false, message: "フォルダ名に「~」は使えません。" };
+      // 拒否する。Chrome はドットの位置なども見るが、ここでは長さだけで判定して単純にする。
+      if (segment.includes("~") && segment.length <= 12) {
+        return {
+          ok: false,
+          message: "12 文字以下のフォルダ名には「~」を使えません。",
+        };
       }
       if (hasUnsafeEdge(segment)) {
         return {
           ok: false,
-          message: "フォルダ名の先頭と末尾に空白・「.」は使えません。",
+          message: "フォルダ名の先頭と末尾に空白・「.」・「~」は使えません。",
         };
       }
       if (isReservedName(segment)) {
