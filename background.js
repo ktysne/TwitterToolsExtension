@@ -6,18 +6,23 @@
  *
  * chrome.downloads はダウンロード先URLに対する host_permissions を必要と
  * しないが、改竄されたレスポンスや DOM 由来の値が紛れ込んでも被害が出ない
- * よう、実行前に URL（https かつ twimg.com 系のみ）と保存パス
- * （TwitterMedia 配下に強制し、.. や絶対パスを排除）を検証する。
+ * よう、実行前に URL（https かつ twimg.com 系のみ）と、URL から取り出した
+ * 元の名前と拡張子、設定から組み立てる保存パス（相対フォルダ・ファイル名の各規則）
+ * を検証する。
  *
  * 設定 skipExisting（既定オン）がオンのときは、保存先に同名ファイルが既に
  * ある項目のダウンロードを発行しない。chrome.downloads にはスキップ用の
  * conflictAction が無いため、chrome.downloads.search でダウンロード履歴を
  * 引き、ダウンロード中または完了済みで実在する同名ファイルがあるかで判定する。
- * 履歴に載る前の重複は、発行予定のファイル名をメモリ上に予約して防ぐ。
+ * 履歴に載る前の重複は、発行予定の保存パスをメモリ上に予約して防ぐ。
+ * 応答には開始成功・同名スキップ・開始失敗の件数を返す。
  */
 "use strict";
 
-const FOLDER = "TwitterMedia";
+const SavePath =
+  typeof module !== "undefined" && module.exports
+    ? require("./savepath.js")
+    : (importScripts("savepath.js"), globalThis.TteSavePath);
 const MAX_ITEMS = 30; // 1投稿の画像は最大4枚程度。改竄レスポンスでの大量DLを防ぐ上限。
 
 // https かつ Twitter のメディアCDN(*.twimg.com)のURLだけ通す
@@ -34,18 +39,54 @@ function safeUrl(url) {
   }
 }
 
-// 保存パスを TwitterMedia/ 配下に強制し、.. や絶対パス・制御文字を弾く
-function safeFilename(name) {
-  if (typeof name !== "string") return null;
-  const parts = name.split("/").filter(Boolean);
-  if (!parts.length) return null;
-  for (const seg of parts) {
-    if (seg === "." || seg === ".." || /[\\:*?"<>|\x00-\x1f]/.test(seg)) {
-      return null;
+// 安全な URL のパスから、保存ファイル名に使う元の名前と拡張子を取り出す。
+// パスはデコードせず、許可した文字と拡張子だけを採用する。
+function originalFileName(url) {
+  try {
+    const u = new URL(url);
+    const segment = u.pathname.split("/").pop() || "";
+    if (u.hostname === "pbs.twimg.com" && u.pathname.startsWith("/media/")) {
+      const match = segment.match(
+        /^([A-Za-z0-9_-]{1,64})(?:\.(jpg|jpeg|png|webp|gif))?$/i
+      );
+      if (!match) return null;
+      const format = u.searchParams.get("format");
+      const extension = /^(jpg|jpeg|png|webp|gif)$/i.test(format || "")
+        ? format.toLowerCase()
+        : match[2]
+          ? match[2].toLowerCase()
+          : null;
+      return extension ? { fileName: match[1], ext: extension } : null;
     }
+    const match = segment.match(/^([A-Za-z0-9_-]{1,64})\.mp4$/i);
+    return match ? { fileName: match[1], ext: "mp4" } : null;
+  } catch (_) {
+    return null;
   }
-  if (parts[0] !== FOLDER) parts.unshift(FOLDER);
-  return parts.join("/");
+}
+
+// メッセージの値は DOM 由来で信用せず、保存名に使うメタデータを正規化する。
+// 元の名前と拡張子を取り出せない項目は、保存パスを安全に組み立てられないため除外する。
+function normalizeMediaMeta(item, url) {
+  if (!item || (typeof item !== "object" && typeof item !== "function")) {
+    return null;
+  }
+  const originalMeta = originalFileName(url);
+  if (originalMeta === null) return null;
+
+  const rawScreenName = String(item.screenName ?? "");
+  const screenName =
+    rawScreenName.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 50) || "x";
+  const postId =
+    typeof item.postId === "string" && /^\d{1,20}$/.test(item.postId)
+      ? item.postId
+      : null;
+  return {
+    screenName,
+    postId,
+    fileName: originalMeta.fileName,
+    ext: originalMeta.ext,
+  };
 }
 
 // 送信元が x.com / twitter.com のコンテンツスクリプトか
@@ -124,20 +165,33 @@ function makeFileExists(search) {
     });
 }
 
-// 設定 skipExisting の現在値を読む。service worker はいつでも停止・再起動
-// するため値はキャッシュせず、メッセージごとに読む。失敗時は既定のオン。
-function currentSkipExisting() {
+// 設定は service worker の再起動後も反映するためキャッシュせず、メッセージごとに読む。
+// 保存先と形式は入力値を保持し、実際の検証とフォールバックは SavePath に任せる。
+function currentSettings() {
+  const defaults = {
+    skipExisting: true,
+    saveDir: SavePath.DEFAULT_SAVE_DIR,
+    filenameFormat: SavePath.DEFAULT_FILENAME_FORMAT,
+  };
   return new Promise((resolve) => {
     try {
-      chrome.storage.local.get({ skipExisting: true }, (cfg) => {
+      chrome.storage.local.get(defaults, (cfg) => {
         if (chrome.runtime && chrome.runtime.lastError) {
-          resolve(true);
+          resolve(defaults);
           return;
         }
-        resolve(cfg ? cfg.skipExisting !== false : true);
+        resolve({
+          skipExisting: cfg ? cfg.skipExisting !== false : true,
+          saveDir:
+            cfg && cfg.saveDir !== undefined ? cfg.saveDir : defaults.saveDir,
+          filenameFormat:
+            cfg && cfg.filenameFormat !== undefined
+              ? cfg.filenameFormat
+              : defaults.filenameFormat,
+        });
       });
     } catch (_) {
-      resolve(true);
+      resolve(defaults);
     }
   });
 }
@@ -170,7 +224,7 @@ function release(filename, token) {
 }
 
 // メッセージを受けて検証済みのダウンロードを開始する。
-// 依存（download / fileExists / getSkipExisting）は呼び出し側から差し込める
+// 依存（download / fileExists / getSettings）は呼び出し側から差し込める
 // ようにして、ロジックを単体テストできるようにしてある。
 // 無関係なメッセージだけは同期で null を返す（応答しないため）。
 function handleDownloadMessage(msg, sender, deps) {
@@ -178,33 +232,44 @@ function handleDownloadMessage(msg, sender, deps) {
     return null; // 関係ないメッセージは無視（応答しない）
   }
   if (!fromTwitter(sender)) {
-    return Promise.resolve({ ok: false, started: 0, skipped: 0 });
+    return Promise.resolve({ ok: false, started: 0, skipped: 0, failed: 0 });
   }
   return runDownload(msg, deps);
 }
 
 async function runDownload(msg, deps) {
-  const { download, fileExists, getSkipExisting } = deps || {};
+  const { download, fileExists, getSettings } = deps || {};
 
   // 検証を通った項目だけを先に取り出す
   const targets = [];
   msg.items.slice(0, MAX_ITEMS).forEach((item) => {
     if (!item) return;
     const url = safeUrl(item.url);
-    const filename = safeFilename(item.filename);
-    if (!url || !filename) return;
-    targets.push({ url, filename });
+    if (!url) return;
+    const meta = normalizeMediaMeta(item, url);
+    if (!meta) return;
+    targets.push({ url, meta });
   });
 
   // 設定の読み出しは1メッセージにつき1回だけ
-  let skipExisting = false;
-  if (targets.length && typeof getSkipExisting === "function") {
-    skipExisting = !!(await getSkipExisting());
+  let settings = {};
+  if (targets.length && typeof getSettings === "function") {
+    settings = (await getSettings()) || {};
+  }
+  const skipExisting = settings.skipExisting === true;
+
+  // 設定から解決できないパスは保存候補から外し、件数にも数えない。
+  const resolvedTargets = [];
+  for (const target of targets) {
+    const filename = SavePath.resolveSavePath(settings, target.meta);
+    if (filename !== null) resolvedTargets.push({ ...target, filename });
   }
 
   let started = 0;
   let skipped = 0;
-  for (const t of targets) {
+  let failed = 0;
+  const startPromises = [];
+  for (const t of resolvedTargets) {
     if (skipExisting) {
       // 予約済みなら検索を待たずにスキップする（同一メッセージ内・メッセージ間の重複発行を防ぐ）
       if (pending.has(t.filename)) {
@@ -229,16 +294,33 @@ async function runDownload(msg, deps) {
       // 発行できたものだけ予約する。download() は同期で戻り、ここまでに
       // await を挟まないため、この順でも他のメッセージは割り込めない。
       const token = reserve(t.filename);
-      started++;
       // MV3 の chrome.downloads.download() はコールバック無しで呼ぶと Promise を
-      // 返し、開始に失敗すると reject する。await はしない（応答を遅らせず、
-      // reserve() との間に await を挟まないため）。
+      // 返し、開始に失敗すると reject する。ループ内では await せず（予約までの
+      // 同期区間を保つため）、開始結果はループの後でまとめて待って数える。
       if (ret && typeof ret.then === "function") {
-        ret.catch(() => release(t.filename, token));
+        startPromises.push(
+          Promise.resolve(ret).then(
+            () => {
+              started++;
+            },
+            () => {
+              // 予約を残すと、TTL が切れるまで再試行が無言でスキップされる
+              release(t.filename, token);
+              failed++;
+            }
+          )
+        );
+      } else {
+        started++;
       }
-    } catch (_) {}
+    } catch (_) {
+      failed++;
+    }
   }
-  return { ok: true, started, skipped };
+  // download() の Promise は開始の時点で解決するので、待っても応答はほとんど遅れない。
+  // 開始の失敗を started に数えると、保存されていないのにボタンが成功を表示する。
+  await Promise.all(startPromises);
+  return { ok: true, started, skipped, failed };
 }
 
 // service worker 実行時のみリスナを張る（Node でのテスト読み込み時は張らない）
@@ -247,12 +329,15 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
     const resp = handleDownloadMessage(msg, sender, {
       download: (opts) => chrome.downloads.download(opts),
       fileExists: makeFileExists((q, cb) => chrome.downloads.search(q, cb)),
-      getSkipExisting: currentSkipExisting,
+      getSettings: currentSettings,
     });
     if (resp === null) return; // 無関係なメッセージ
     // 応答を返さないままだとボタンが「保存中…」から戻らないため、
     // 想定外の失敗でも必ず何かを返す
-    resp.then(sendResponse, () => sendResponse({ ok: false, started: 0, skipped: 0 }));
+    resp.then(
+      sendResponse,
+      () => sendResponse({ ok: false, started: 0, skipped: 0, failed: 0 })
+    );
     return true; // 応答は非同期で返す
   });
 }
@@ -260,7 +345,8 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     safeUrl,
-    safeFilename,
+    originalFileName,
+    normalizeMediaMeta,
     fromTwitter,
     escapeRegExp,
     existsQuery,

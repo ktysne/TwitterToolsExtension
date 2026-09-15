@@ -5,7 +5,9 @@
  *   - 画像の投稿: 「画像を保存」(1枚) / 「全N枚保存」(複数枚) ボタン（原寸 name=orig）
  *   - 動画/GIFの投稿: 「動画を保存」ボタン（最高画質 mp4。複数本も一括）
  *   - 画像と動画が混在する投稿: 「メディアを保存」ボタン（全部まとめて）
- * 実ダウンロードは background.js（chrome.downloads）に依頼する。
+ * 実ダウンロードと保存パスの組み立ては background.js（chrome.downloads）に依頼し、
+ * ここでは URL と投稿メタデータだけを送る。保存ファイル名の {file_name} に使う
+ * 元のファイル名は background.js が URL から取り出す。
  *
  * 画像の場所（実DOMで確認済み）:
  *   article 内の  a[href*="/photo/N"] > ... > img[src*="pbs.twimg.com/media/<ID>"]
@@ -20,7 +22,6 @@
   const MEDIA_IMG = 'img[src*="pbs.twimg.com/media/"]';
   const VIDEO_BOX = '[data-testid="videoPlayer"], [data-testid="videoComponent"]';
   const MIN_IMAGES = 1; // 1枚でも対象にする
-  const FOLDER = "TwitterMedia";
 
   let enabled = true;
 
@@ -43,17 +44,13 @@
   }
 
   // ---- ヘルパ ----
-  function sanitize(s) {
-    return String(s).replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
-  }
-
   function mediaIdOf(img) {
     const m = img && img.src && img.src.match(/\/media\/([^?\/]+)/);
     return m ? m[1] : null;
   }
 
-  // 表示中の画像URLから format を取り出す（既知の画像形式のみ採用）。
-  // 不明・未指定なら jpg にフォールバック。ファイル名の拡張子に使う。
+  // 表示中の画像URLから format を取り出し、原寸URLの format に使う。
+  // 不明・未指定なら jpg にフォールバックする。
   function pickFormat(src) {
     try {
       const f = new URL(src, "https://pbs.twimg.com/").searchParams.get("format");
@@ -100,7 +97,7 @@
     }
   }
 
-  // 投稿の全画像（原寸URL＋保存名）
+  // 投稿の全画像（原寸URL＋投稿メタデータ）。保存名は background.js が組み立てる。
   function collectImages(article) {
     const { handle, tweetId } = tweetMetaOf(article);
     const seen = new Set();
@@ -111,29 +108,26 @@
       if (!id || seen.has(id)) return;
       seen.add(id);
       const fmt = pickFormat(img.src);
-      const photoM = (a.getAttribute("href") || "").match(/\/photo\/(\d+)/);
-      const n = photoM ? photoM[1] : out.length + 1;
       out.push({
         url: origImageUrl(id, fmt),
-        filename: `${FOLDER}/${sanitize(handle)}_${tweetId || "img"}_${n}.${fmt}`,
+        screenName: handle,
+        postId: tweetId,
       });
     });
     return out;
   }
 
-  // 投稿の全動画（最高画質mp4＋保存名）。未取得なら空配列。
+  // 投稿の全動画（最高画質mp4＋投稿メタデータ）。未取得なら空配列。
   function collectVideos(article) {
     const { handle, tweetId } = tweetMetaOf(article);
     if (!tweetId) return [];
     let urls = readVideoMap()[tweetId];
     if (typeof urls === "string") urls = [urls]; // 旧形式（単一URL）との後方互換
     if (!Array.isArray(urls) || !urls.length) return [];
-    const multi = urls.length > 1;
-    return urls.map((url, i) => ({
+    return urls.map((url) => ({
       url,
-      filename: `${FOLDER}/${sanitize(handle)}_${tweetId}${
-        multi ? "_" + (i + 1) : ""
-      }.mp4`,
+      screenName: handle,
+      postId: tweetId,
     }));
   }
 
@@ -157,14 +151,20 @@
   }
 
   // background からの応答をボタンに出す文言に変える。
-  // skipped が無い旧形式の応答でも従来どおりの表示になる。
+  // failed や skipped が無い旧形式の応答でも、欠けた件数を0として表示する。
   function resultLabel(resp) {
     if (!resp || !resp.ok) return "保存失敗";
     const started = resp.started || 0;
     const skipped = resp.skipped || 0;
-    if (started > 0 && skipped > 0) return `✓ ${started}件(${skipped}件済)`;
+    const failed = resp.failed || 0;
+    if (started === 0 && failed > 0) {
+      return skipped > 0 ? `保存失敗(${skipped}件済)` : "保存失敗";
+    }
     if (started === 0 && skipped > 0) return "✓ 保存済み";
-    return `✓ ${started}件`;
+    const details = [];
+    if (skipped > 0) details.push(`${skipped}件済`);
+    if (failed > 0) details.push(`${failed}件失敗`);
+    return `✓ ${started}件${details.length ? `(${details.join("・")})` : ""}`;
   }
 
   function makeButton(label, getItems, missText) {
@@ -313,6 +313,6 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { sanitize, mediaIdOf, pickFormat, origImageUrl, resultLabel };
+    module.exports = { mediaIdOf, pickFormat, origImageUrl, resultLabel };
   }
 })();

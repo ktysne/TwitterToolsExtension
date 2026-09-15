@@ -96,10 +96,10 @@
         font-size: 11px;
         margin-left: 6px;
       }
+      input[type="text"],
       textarea {
         width: 100%;
         box-sizing: border-box;
-        resize: vertical;
         background: #0c0d0f;
         color: #e7e9ea;
         border: 1px solid #2f3336;
@@ -109,6 +109,10 @@
         line-height: 1.4;
         font-family: inherit;
       }
+      textarea {
+        resize: vertical;
+      }
+      input[type="text"]:focus,
       textarea:focus {
         outline: none;
         border-color: #1d9bf0;
@@ -118,6 +122,60 @@
         font-size: 11px;
         margin-top: 4px;
         min-height: 1em;
+        word-break: break-all;
+        white-space: pre-line;
+      }
+      .err.warning {
+        color: #ffd400;
+      }
+      .tokens {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .token {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        min-height: 32px;
+        padding: 4px 7px;
+        background: #16181c;
+        color: #e7e9ea;
+        border: 1px solid #2f3336;
+        border-radius: 6px;
+        cursor: pointer;
+        font: inherit;
+        text-align: left;
+      }
+      .token:hover,
+      .token:focus-visible {
+        outline: none;
+        border-color: #1d9bf0;
+      }
+      .token:last-child {
+        grid-column: 1 / -1;
+      }
+      .token code {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11px;
+      }
+      .token small {
+        color: #71767b;
+        font-size: 10px;
+        line-height: 1.2;
+      }
+      .note,
+      .preview {
+        color: #71767b;
+        font-size: 11px;
+      }
+      .note {
+        margin-top: 4px;
+      }
+      .preview {
+        margin-top: 4px;
         word-break: break-all;
       }
       .count {
@@ -184,7 +242,31 @@
       </label>
     </div>
 
-    <div class="row">
+    <div class="field">
+      <label for="saveDir">保存先フォルダ<small>ダウンロードフォルダ内</small></label>
+      <input type="text" id="saveDir" placeholder="TwitterMedia" maxlength="100"
+        spellcheck="false" autocomplete="off" aria-describedby="saveDirHint saveDirMsg" />
+      <div class="note" id="saveDirHint">「/」で区切るとサブフォルダになります。空欄なら TwitterMedia。</div>
+      <div class="err" id="saveDirMsg" aria-live="polite"></div>
+    </div>
+
+    <div class="field">
+      <label for="filenameFormat">ファイル名の形式</label>
+      <input type="text" id="filenameFormat" placeholder="{screen_name}_{post_id}_{file_name}" maxlength="100"
+        spellcheck="false" autocomplete="off" aria-describedby="formatHint formatMsg" />
+      <div class="tokens" role="group" aria-label="項目を挿入">
+        <button type="button" class="token" data-token="{screen_name}"><code>{screen_name}</code><small>@id</small></button>
+        <button type="button" class="token" data-token="{yyyyMMdd}"><code>{yyyyMMdd}</code><small>投稿日</small></button>
+        <button type="button" class="token" data-token="{HHmmss}"><code>{HHmmss}</code><small>投稿時刻</small></button>
+        <button type="button" class="token" data-token="{post_id}"><code>{post_id}</code><small>投稿ID</small></button>
+        <button type="button" class="token" data-token="{file_name}"><code>{file_name}</code><small>元のファイル名</small></button>
+      </div>
+      <div class="note" id="formatHint">ボタンで項目を挿入できます。{file_name}（元のファイル名）は必ず含めてください。拡張子は末尾に自動で付きます。日時は投稿日時（この PC の時刻）です。空欄なら既定の形式。</div>
+      <div class="err" id="formatMsg" aria-live="polite"></div>
+      <div class="preview" id="savePreview"></div>
+    </div>
+
+    <div class="row sep">
       <span class="label">
         コピーするリンクを整える
         <small>「リンクをコピー」から ?s=… などの追跡パラメータを除く</small>
@@ -236,6 +318,7 @@
     <div class="count">このタブで除外: <b id="count">0</b> 件</div>
     <div class="hint" id="hint"></div>
 
+    <script src="savepath.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>
