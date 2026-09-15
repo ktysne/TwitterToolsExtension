@@ -42,11 +42,12 @@ ISOLATED world はページの `fetch` をフックできない。
 
 - `interceptor.js`：GraphQL のタイムライン系レスポンスから、ブロック/ミュート対象とワード/@id ミュートに一致する投稿を取り除く。動画のmp4 URLを集める。動画の自動再生を抑止する。コピー時に、単一の X の URL から追跡パラメータ(`s` / `t` など)を取り除く(`copy` イベントと `navigator.clipboard.writeText` のフック)。
 - `bridge.js`：設定を data 属性へ、ミュートのルールを `__tteMuteRules` へ反映する。ポップアップからの件数問い合わせに答える。
-- `imagesave.js`：メディア投稿に保存ボタンを設置し、保存対象のURLを集めて `background.js` へ渡す。
+- `imagesave.js`：メディア投稿に保存ボタンを設置し、保存対象のURLとファイル名の材料となるメタデータを集めて `background.js` へ送る。ファイル名と保存パスは組み立てない。
+- `savepath.js`：ファイル名形式の展開、保存先パスの検証、パス解決を行う副作用のない共有モジュール。`background.js`、`popup.js`（`popup.html` から読み込む）、テストから使われる。
 - `mutemenu.js`：投稿の ⋯ メニューに「拡張機能でミュート」項目を足し、クリックで著者の @id を `muteHandles` に追加/解除する。
 - `domhide.js`：ワード/@id ミュートのルールが変わったとき、すでに描画済みの一致する投稿を DOM 上で即座に隠す(新規読み込み分は `interceptor.js` が処理する)。
-- `background.js`：受け取ったURLを `chrome.downloads` で保存する。コンテンツスクリプトは `chrome.downloads` を直接呼べないため、ここが実行役になる。
-- `popup.html` と `popup.js`：各機能のトグルと、ワード・@id ミュートの入力欄、現在のタブでのミュート件数を表示する。
+- `background.js`：受け取ったメタデータと設定からファイル名と保存パスを組み立てて検証し、`chrome.downloads` で保存する。ファイル名の組み立てと検証をここに集中させるのは、設定の読み出し、DOM 由来の値の検証、保存パスの決定を、ダウンロードを発行する 1 箇所で行うためである。コンテンツスクリプトは `chrome.downloads` を直接呼べないため、ここが実行役になる。
+- `popup.html` と `popup.js`：各機能のトグル、メディアの保存先フォルダとファイル名形式、ワード・@id ミュートの入力欄、現在のタブでのミュート件数を表示する。
 
 ## 全フレームへの適用
 
@@ -77,8 +78,8 @@ X はレスポンスを自前のリスナで読むため、`send` 内で後か�
 除外判定（`filterPayload` / `itemContentIsBad` など）は、設定を `ctx = { relOn, rules }`
 として引数で受け取る純粋関数にしてある。DOM(`<html data-tte-enabled>` や
 `__tteMuteRules`)を読むのはレスポンスごとに 1 度だけで、その結果を `ctx` に詰めて
-再帰に渡す。同様に、保存URL/パスの検証(`background.js`)や保存名の組み立て
-(`imagesave.js`)も DOM やネットワークに依存しない関数に分けてある。
+再帰に渡す。同様に、保存URLの検証(`background.js`)や保存先パスと保存名の検証・組み立て
+(`savepath.js`)も DOM やネットワークに依存しない関数に分けてある。
 
 これらの関数は Node から `require` して `node:test` で検証している。
 各スクリプトは、ブラウザ API を触る副作用を「その API があるときだけ」実行するよう

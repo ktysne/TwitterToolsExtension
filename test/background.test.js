@@ -6,7 +6,8 @@ const assert = require("node:assert/strict");
 
 const {
   safeUrl,
-  safeFilename,
+  originalFileName,
+  normalizeMediaMeta,
   fromTwitter,
   existsQuery,
   hasSameFile,
@@ -30,40 +31,163 @@ test("safeUrl: https の twimg.com 系だけ通す", () => {
 });
 
 test("safeUrl: http・別ホスト・不正値は弾く", () => {
-  assert.equal(safeUrl("http://pbs.twimg.com/media/x"), null); // http
-  assert.equal(safeUrl("https://evil.example/x"), null); // 別ホスト
+  assert.equal(safeUrl("http://pbs.twimg.com/media/x"), null);
+  assert.equal(safeUrl("https://evil.example/x"), null);
   assert.equal(safeUrl("https://nottwimg.com/x"), null);
-  assert.equal(safeUrl("https://twimg.com.evil.com/x"), null); // サフィックス偽装
+  assert.equal(safeUrl("https://twimg.com.evil.com/x"), null);
   assert.equal(safeUrl("javascript:alert(1)"), null);
   assert.equal(safeUrl("not a url"), null);
   assert.equal(safeUrl(null), null);
 });
 
-// ---- safeFilename ----------------------------------------------------------
+// ---- originalFileName ------------------------------------------------------
 
-test("safeFilename: TwitterMedia 配下に強制する", () => {
-  assert.equal(safeFilename("alice_123_1.jpg"), "TwitterMedia/alice_123_1.jpg");
-  assert.equal(
-    safeFilename("TwitterMedia/alice_123_1.jpg"),
-    "TwitterMedia/alice_123_1.jpg"
+test("画像URLから元の名前と format の拡張子を取り出す", () => {
+  assert.deepEqual(
+    originalFileName(
+      "https://pbs.twimg.com/media/GXyZ1aBcDeFgHi?format=jpg&name=orig"
+    ),
+    { fileName: "GXyZ1aBcDeFgHi", ext: "jpg" }
   );
 });
 
-test("safeFilename: パストラバーサル・絶対パス・制御文字を弾く", () => {
-  assert.equal(safeFilename("../etc/passwd"), null);
-  assert.equal(safeFilename("TwitterMedia/../../secret"), null);
-  assert.equal(safeFilename("a/./b.jpg"), null);
-  assert.equal(safeFilename("a\\b.jpg"), null); // バックスラッシュ
-  assert.equal(safeFilename("a\x00b.jpg"), null); // 制御文字
-  assert.equal(safeFilename("a:b.jpg"), null);
-  assert.equal(safeFilename(""), null);
-  assert.equal(safeFilename(null), null);
-  assert.equal(safeFilename(123), null);
+test("画像URLの名前にある拡張子を小文字化して取り出す", () => {
+  assert.deepEqual(
+    originalFileName("https://pbs.twimg.com/media/GXyZ1aBcDeFgHi.JPEG?name=orig"),
+    { fileName: "GXyZ1aBcDeFgHi", ext: "jpeg" }
+  );
 });
 
-test("safeFilename: 先頭スラッシュは空要素として除かれ、配下に収まる", () => {
-  // "/abs/path.jpg" → ["abs","path.jpg"] になり、危険文字も無いので配下に収まる
-  assert.equal(safeFilename("/foo/bar.jpg"), "TwitterMedia/foo/bar.jpg");
+test("画像URLではクエリの format を優先する", () => {
+  assert.deepEqual(
+    originalFileName(
+      "https://pbs.twimg.com/media/GXyZ1aBcDeFgHi.jpg?format=PNG&name=orig"
+    ),
+    { fileName: "GXyZ1aBcDeFgHi", ext: "png" }
+  );
+});
+
+test("originalFileName: 未知のformatでsegmentにも拡張子が無ければnullを返す", () => {
+  assert.equal(
+    originalFileName("https://pbs.twimg.com/media/GXyZ1aBcDeFgHi?format=svg"),
+    null
+  );
+});
+
+test("originalFileName: 名前に許可外の文字があればnullを返す", () => {
+  assert.equal(originalFileName("https://pbs.twimg.com/media/GXyZ%1a"), null);
+  assert.equal(originalFileName("https://pbs.twimg.com/media/GXyZ..jpg"), null);
+});
+
+test("クエリ付きの動画 mp4 から元の名前と拡張子を取り出す", () => {
+  assert.deepEqual(
+    originalFileName("https://video.twimg.com/ext_tw_video/AbCdEf.mp4?tag=12"),
+    { fileName: "AbCdEf", ext: "mp4" }
+  );
+});
+
+test("originalFileName: mp4以外の動画形式はnullを返す", () => {
+  assert.equal(
+    originalFileName("https://video.twimg.com/ext_tw_video/AbCdEf.m3u8"),
+    null
+  );
+});
+
+test("originalFileName: pbs.twimg.comのmedia以外のパスは画像として扱わない", () => {
+  assert.equal(
+    originalFileName("https://pbs.twimg.com/profile_images/GXyZ.jpg?format=jpg"),
+    null
+  );
+});
+
+// ---- normalizeMediaMeta ---------------------------------------------------
+
+test("URLから元の名前と拡張子を取り出し、項目を正規化する", () => {
+  assert.deepEqual(
+    normalizeMediaMeta(
+      { screenName: "a", postId: "1", index: 1, ext: "svg" },
+      "https://pbs.twimg.com/media/GXyZ.jpg"
+    ),
+    { screenName: "a", postId: "1", fileName: "GXyZ", ext: "jpg" }
+  );
+  assert.deepEqual(
+    normalizeMediaMeta(
+      { screenName: "a", postId: "1", index: null, ext: "mp4" },
+      "https://video.twimg.com/ext_tw_video/AbCd.mp4?tag=1"
+    ),
+    { screenName: "a", postId: "1", fileName: "AbCd", ext: "mp4" }
+  );
+  assert.equal(
+    normalizeMediaMeta(
+      { screenName: "a", postId: "1" },
+      "https://pbs.twimg.com/media/GXyZ"
+    ),
+    null
+  );
+});
+
+test("normalizeMediaMeta: screenName を置換・切り詰めし、空なら x にする", () => {
+  assert.equal(
+    normalizeMediaMeta(
+      { screenName: "alice/@b", postId: "1" },
+      "https://pbs.twimg.com/media/a.jpg"
+    ).screenName,
+    "alice__b"
+  );
+  assert.equal(
+    normalizeMediaMeta(
+      { screenName: "a".repeat(60), postId: "1" },
+      "https://pbs.twimg.com/media/a.jpg"
+    ).screenName.length,
+    50
+  );
+  assert.equal(
+    normalizeMediaMeta(
+      { screenName: "日本語/!?", postId: "1" },
+      "https://pbs.twimg.com/media/a.jpg"
+    ).screenName,
+    "______"
+  );
+  assert.equal(
+    normalizeMediaMeta(
+      { screenName: "", postId: "1" },
+      "https://pbs.twimg.com/media/a.jpg"
+    ).screenName,
+    "x"
+  );
+});
+
+test("normalizeMediaMeta: postId の許可範囲だけ残す", () => {
+  assert.deepEqual(
+    normalizeMediaMeta(
+      { screenName: "a", postId: "12345678901234567890", index: 99 },
+      "https://pbs.twimg.com/media/a.jpg"
+    ),
+    { screenName: "a", postId: "12345678901234567890", fileName: "a", ext: "jpg" }
+  );
+  assert.deepEqual(
+    normalizeMediaMeta(
+      { screenName: "a", postId: 123, index: "1" },
+      "https://pbs.twimg.com/media/a.jpg"
+    ),
+    { screenName: "a", postId: null, fileName: "a", ext: "jpg" }
+  );
+  for (const postId of ["", "x", "1".repeat(21)]) {
+    assert.equal(
+      normalizeMediaMeta(
+        { screenName: "a", postId },
+        "https://pbs.twimg.com/media/a.jpg"
+      ).postId,
+      null
+    );
+  }
+});
+
+test("normalizeMediaMeta: 元のファイル名を取り出せないURLは除外する", () => {
+  assert.equal(
+    normalizeMediaMeta({ screenName: "a", postId: "1" }, "https://pbs.twimg.com/media/a"),
+    null
+  );
 });
 
 // ---- fromTwitter -----------------------------------------------------------
@@ -97,21 +221,21 @@ test("existsQuery: 末尾一致・メタ文字エスケープ・両方の区切�
   const re = new RegExp(q.filenameRegex);
   assert.equal(re.test("C:\\Users\\x\\Downloads\\TwitterMedia\\a.jpg"), true);
   assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg"), true);
-  assert.equal(re.test("/home/x/Downloads/TwitterMedia/aXjpg"), false); // . はメタ文字でない
-  assert.equal(re.test("/home/x/Downloads/Other/a.jpg"), false); // 別フォルダ
-  assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg.bak"), false); // 末尾一致
+  assert.equal(re.test("/home/x/Downloads/TwitterMedia/aXjpg"), false);
+  assert.equal(re.test("/home/x/Downloads/Other/a.jpg"), false);
+  assert.equal(re.test("/home/x/Downloads/TwitterMedia/a.jpg.bak"), false);
 });
 
 // ---- hasSameFile -----------------------------------------------------------
 
 test("hasSameFile: ダウンロード中と、完了済みで実在するものをヒットとする", () => {
-  assert.equal(hasSameFile([{ state: "in_progress" }]), true); // 完了前でもヒット
+  assert.equal(hasSameFile([{ state: "in_progress" }]), true);
   assert.equal(hasSameFile([{ state: "complete", exists: true }]), true);
 });
 
 test("hasSameFile: 実在を確認できない完了済み・中断・空・非配列はヒットしない", () => {
   assert.equal(hasSameFile([{ state: "complete", exists: false }]), false);
-  assert.equal(hasSameFile([{ state: "complete" }]), false); // exists 不明はヒットしない
+  assert.equal(hasSameFile([{ state: "complete" }]), false);
   assert.equal(hasSameFile([{ state: "interrupted" }]), false);
   assert.equal(hasSameFile([{ state: "interrupted", exists: true }]), false);
   assert.equal(hasSameFile([]), false);
@@ -154,53 +278,61 @@ test("makeFileExists: search が例外を投げたら false（DLを止めない�
 
 const SENDER = { url: "https://x.com/search" };
 
-// 既定の deps。個別テストで必要な部分だけ差し替える。
-function makeDeps(over) {
-  const calls = [];
+function item(over) {
   return Object.assign(
     {
-      calls,
-      download: (opts) => calls.push(opts),
-      fileExists: async () => false,
-      getSkipExisting: async () => false,
+      url: "https://pbs.twimg.com/media/a.jpg",
+      screenName: "a",
+      postId: "1",
     },
     over || {}
   );
 }
 
-test("handleDownloadMessage: 検証を通った項目だけダウンロードする", async () => {
+// 既定の deps。個別テストで必要な部分だけ差し替える。
+function makeDeps(over) {
+  const deps = {
+    calls: [],
+    download: (opts) => deps.calls.push(opts),
+    fileExists: async () => false,
+    getSettings: async () => ({ skipExisting: false }),
+  };
+  return Object.assign(deps, over || {});
+}
+
+test("handleDownloadMessage: 検証を通った項目だけ設定から保存パスを作る", async () => {
   const deps = makeDeps();
   const resp = await handleDownloadMessage(
     {
       type: "tte-download-images",
       items: [
-        { url: "https://pbs.twimg.com/media/a?name=orig", filename: "alice_1_1.jpg" },
-        { url: "https://evil.example/x", filename: "x.jpg" }, // URL 不正 → 弾く
-        { url: "https://pbs.twimg.com/media/b", filename: "../escape.jpg" }, // パス不正 → 弾く
+        item({ screenName: "alice", postId: "1" }),
+        item({ url: "https://evil.example/x", screenName: "x", postId: "2" }),
+        item({ url: "https://pbs.twimg.com/media/c.svg", screenName: "x", postId: "3" }),
+        item({ url: "https://pbs.twimg.com/media/d", screenName: "alice", postId: "4" }),
       ],
     },
     SENDER,
     deps
   );
-  assert.deepEqual(resp, { ok: true, started: 1, skipped: 0 });
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 0, failed: 0 });
   assert.equal(deps.calls.length, 1);
-  assert.equal(deps.calls[0].filename, "TwitterMedia/alice_1_1.jpg");
+  assert.equal(deps.calls[0].filename, "TwitterMedia/alice_1_a.jpg");
   assert.equal(deps.calls[0].saveAs, false);
 });
 
 test("handleDownloadMessage: Twitter 以外の送信元は拒否", async () => {
   const deps = makeDeps();
   const resp = await handleDownloadMessage(
-    { type: "tte-download-images", items: [{ url: "https://pbs.twimg.com/media/a", filename: "x.jpg" }] },
+    { type: "tte-download-images", items: [item()] },
     { url: "https://evil.com/x" },
     deps
   );
-  assert.deepEqual(resp, { ok: false, started: 0, skipped: 0 });
+  assert.deepEqual(resp, { ok: false, started: 0, skipped: 0, failed: 0 });
   assert.equal(deps.calls.length, 0);
 });
 
 test("handleDownloadMessage: 無関係なメッセージは null（応答しない）", () => {
-  // 同期で null を返す（Promise でないこと）
   assert.equal(handleDownloadMessage({ type: "other" }, SENDER, makeDeps()), null);
   assert.equal(handleDownloadMessage(null, SENDER, makeDeps()), null);
   assert.equal(
@@ -210,161 +342,192 @@ test("handleDownloadMessage: 無関係なメッセージは null（応答しな�
 });
 
 test("handleDownloadMessage: 最大件数を超える分は切り捨てる", async () => {
-  const items = Array.from({ length: 50 }, (_, i) => ({
-    url: "https://pbs.twimg.com/media/" + i,
-    filename: "a_" + i + ".jpg",
-  }));
+  const items = Array.from({ length: 50 }, (_, i) => item({ postId: String(i) }));
   const deps = makeDeps();
   const resp = await handleDownloadMessage({ type: "tte-download-images", items }, SENDER, deps);
   assert.equal(resp.ok, true);
-  assert.equal(resp.started, 30); // MAX_ITEMS
+  assert.equal(resp.started, 30);
+  assert.equal(resp.failed, 0);
   assert.equal(deps.calls.length, 30);
+});
+
+test("handleDownloadMessage: 保存先と形式の設定を反映する", async () => {
+  const deps = makeDeps({
+    getSettings: async () => ({
+      skipExisting: false,
+      saveDir: "Archive/Images",
+      filenameFormat: "{screen_name}-{post_id}-{file_name}",
+    }),
+  });
+  const resp = await handleDownloadMessage(
+    { type: "tte-download-images", items: [item({ screenName: "alice", postId: "123" })] },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 0, failed: 0 });
+  assert.equal(deps.calls[0].filename, "Archive/Images/alice-123-a.jpg");
+});
+
+test("handleDownloadMessage: 不正な設定値は既定値にフォールバックする", async () => {
+  const deps = makeDeps({
+    getSettings: async () => ({
+      skipExisting: false,
+      saveDir: "C:\\escape",
+      filenameFormat: "{screen_name}/{post_id}",
+    }),
+  });
+  const resp = await handleDownloadMessage(
+    { type: "tte-download-images", items: [item({ screenName: "alice", postId: "123" })] },
+    SENDER,
+    deps
+  );
+  assert.equal(resp.started, 1);
+  assert.equal(deps.calls[0].filename, "TwitterMedia/alice_123_a.jpg");
 });
 
 test("handleDownloadMessage: 同名ファイルがある項目はスキップする", async () => {
   const deps = makeDeps({
-    getSkipExisting: async () => true,
-    fileExists: async (filename) => filename === "TwitterMedia/a.jpg",
+    getSettings: async () => ({ skipExisting: true }),
+    fileExists: async (filename) => filename === "TwitterMedia/a_1_a.jpg",
   });
   const resp = await handleDownloadMessage(
     {
       type: "tte-download-images",
-      items: [
-        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }, // 既にある → スキップ
-        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
-      ],
+      items: [item({ postId: "1" }), item({ postId: "2" })],
     },
     SENDER,
     deps
   );
-  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1 });
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1, failed: 0 });
   assert.equal(deps.calls.length, 1);
-  assert.equal(deps.calls[0].filename, "TwitterMedia/b.jpg");
+  assert.equal(deps.calls[0].filename, "TwitterMedia/a_2_a.jpg");
 });
 
 test("handleDownloadMessage: 設定がオフなら同名でも全件ダウンロードする", async () => {
   let existsCalls = 0;
   const deps = makeDeps({
-    getSkipExisting: async () => false,
+    getSettings: async () => ({ skipExisting: false }),
     fileExists: async () => {
       existsCalls++;
       return true;
     },
   });
   const resp = await handleDownloadMessage(
-    {
-      type: "tte-download-images",
-      items: [
-        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
-        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
-      ],
-    },
+    { type: "tte-download-images", items: [item({ postId: "1" }), item({ postId: "2" })] },
     SENDER,
     deps
   );
-  assert.deepEqual(resp, { ok: true, started: 2, skipped: 0 });
-  assert.equal(existsCalls, 0); // 設定オフなら存在確認そのものを行わない
+  assert.deepEqual(resp, { ok: true, started: 2, skipped: 0, failed: 0 });
+  assert.equal(existsCalls, 0);
 });
 
-test("handleDownloadMessage: 予約済みのファイル名は履歴に無くてもスキップする", async () => {
-  const msg = {
-    type: "tte-download-images",
-    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
-  };
-  // 履歴には出ない（＝発行直後で検索に載らない）状況を模す
+test("handleDownloadMessage: 予約済みの保存パスは履歴に無くてもスキップする", async () => {
+  const msg = { type: "tte-download-images", items: [item()] };
   const deps = makeDeps({
-    getSkipExisting: async () => true,
+    getSettings: async () => ({ skipExisting: true }),
     fileExists: async () => false,
   });
 
   const first = await handleDownloadMessage(msg, SENDER, deps);
-  assert.deepEqual(first, { ok: true, started: 1, skipped: 0 });
+  assert.deepEqual(first, { ok: true, started: 1, skipped: 0, failed: 0 });
 
   const second = await handleDownloadMessage(msg, SENDER, deps);
-  assert.deepEqual(second, { ok: true, started: 0, skipped: 1 });
-  assert.equal(deps.calls.length, 1); // 2通目は発行しない
+  assert.deepEqual(second, { ok: true, started: 0, skipped: 1, failed: 0 });
+  assert.equal(deps.calls.length, 1);
 });
 
 test("handleDownloadMessage: 同一メッセージ内の同名ファイルは1件だけ発行する", async () => {
   const deps = makeDeps({
-    getSkipExisting: async () => true,
+    getSettings: async () => ({ skipExisting: true }),
     fileExists: async () => false,
   });
   const resp = await handleDownloadMessage(
     {
       type: "tte-download-images",
       items: [
-        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
-        { url: "https://pbs.twimg.com/media/a2", filename: "a.jpg" },
+        item(),
+        item(),
       ],
     },
     SENDER,
     deps
   );
-  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1 });
+  assert.deepEqual(resp, { ok: true, started: 1, skipped: 1, failed: 0 });
   assert.equal(deps.calls.length, 1);
 });
 
 test("handleDownloadMessage: 並行するメッセージでも同名は1件だけ発行する", async () => {
-  // 存在確認の解決を後から行えるようにして、await の待ち時間に別のメッセージが
-  // 同じ判定を通る状況を作る
   let resolveExists;
   const gate = new Promise((resolve) => {
     resolveExists = resolve;
   });
   const deps = makeDeps({
-    getSkipExisting: async () => true,
+    getSettings: async () => ({ skipExisting: true }),
     fileExists: () => gate.then(() => false),
   });
-  const msg = {
-    type: "tte-download-images",
-    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
-  };
+  const msg = { type: "tte-download-images", items: [item()] };
 
   const first = handleDownloadMessage(msg, SENDER, deps);
   const second = handleDownloadMessage(msg, SENDER, deps);
   resolveExists();
   const [a, b] = await Promise.all([first, second]);
 
-  assert.equal(deps.calls.length, 1); // 発行は1件だけ
+  assert.equal(deps.calls.length, 1);
   assert.equal(a.started + b.started, 1);
   assert.equal(a.skipped + b.skipped, 1);
+  assert.equal(a.failed + b.failed, 0);
 });
 
-test("handleDownloadMessage: 発行に失敗したら予約を外して再試行できる", async () => {
+test("handleDownloadMessage: download の拒否は failed に数え、予約を外す", async () => {
   const deps = makeDeps({
-    getSkipExisting: async () => true,
+    getSettings: async () => ({ skipExisting: true }),
     fileExists: async () => false,
     download: (opts) => {
       deps.calls.push(opts);
-      // 1回目だけ開始に失敗する（MV3 の download() は reject する Promise を返す）
-      return deps.calls.length === 1
-        ? Promise.reject(new Error("start failed"))
-        : Promise.resolve(1);
+      return Promise.reject(new Error("start failed"));
     },
   });
-  const msg = {
-    type: "tte-download-images",
-    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
-  };
+  const msg = { type: "tte-download-images", items: [item()] };
 
   const first = await handleDownloadMessage(msg, SENDER, deps);
-  assert.deepEqual(first, { ok: true, started: 1, skipped: 0 });
-
-  // .catch はマイクロタスクで走るため、予約が外れるまで少し待つ
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(first, { ok: true, started: 0, skipped: 0, failed: 1 });
 
   const second = await handleDownloadMessage(msg, SENDER, deps);
-  assert.deepEqual(second, { ok: true, started: 1, skipped: 0 }); // スキップされない
+  assert.deepEqual(second, { ok: true, started: 0, skipped: 0, failed: 1 });
   assert.equal(deps.calls.length, 2);
 });
 
-test("handleDownloadMessage: 古い発行の失敗は新しい予約を消さない", async () => {
-  // 設定オフのときは同名でも続けて発行するため、同じファイル名の予約が二度起きる。
-  // 1件目の開始失敗による解除が2件目の予約まで消してしまうと、設定をオンに
-  // 戻した直後（履歴がまだ追いつかない間）に重複が発行されてしまう。
+test("handleDownloadMessage: download の同期例外は failed に数え、予約しない", async () => {
+  let attempts = 0;
   const deps = makeDeps({
-    getSkipExisting: async () => false,
+    getSettings: async () => ({ skipExisting: true }),
+    fileExists: async () => false,
+    download: (opts) => {
+      deps.calls.push(opts);
+      attempts++;
+      if (attempts === 1) throw new Error("sync failure");
+      return undefined;
+    },
+  });
+  const msg = { type: "tte-download-images", items: [item()] };
+
+  assert.deepEqual(await handleDownloadMessage(msg, SENDER, deps), {
+    ok: true,
+    started: 0,
+    skipped: 0,
+    failed: 1,
+  });
+  assert.deepEqual(await handleDownloadMessage(msg, SENDER, deps), {
+    ok: true,
+    started: 1,
+    skipped: 0,
+    failed: 0,
+  });
+});
+
+test("handleDownloadMessage: 古い発行の失敗は新しい予約を消さない", async () => {
+  const deps = makeDeps({
+    getSettings: async () => ({ skipExisting: false }),
     download: (opts) => {
       deps.calls.push(opts);
       return deps.calls.length === 1
@@ -372,62 +535,51 @@ test("handleDownloadMessage: 古い発行の失敗は新しい予約を消さな
         : Promise.resolve(1);
     },
   });
-  const item = { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" };
-  await handleDownloadMessage(
-    { type: "tte-download-images", items: [item, item] },
+  const same = item();
+  const first = await handleDownloadMessage(
+    { type: "tte-download-images", items: [same, same] },
     SENDER,
     deps
   );
-  assert.equal(deps.calls.length, 2); // 設定オフなので2件とも発行される
+  assert.deepEqual(first, { ok: true, started: 1, skipped: 0, failed: 1 });
+  assert.equal(deps.calls.length, 2);
 
-  // 1件目の reject の .catch が走るのを待つ
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-
-  // 設定をオンに戻す。履歴はまだ追いついていない想定
   const third = await handleDownloadMessage(
-    { type: "tte-download-images", items: [item] },
+    { type: "tte-download-images", items: [same] },
     SENDER,
     makeDeps({
       calls: deps.calls,
       download: (opts) => deps.calls.push(opts),
-      getSkipExisting: async () => true,
+      getSettings: async () => ({ skipExisting: true }),
       fileExists: async () => false,
     })
   );
-  // 2件目の予約が生きているのでスキップされる
-  assert.deepEqual(third, { ok: true, started: 0, skipped: 1 });
+  assert.deepEqual(third, { ok: true, started: 0, skipped: 1, failed: 0 });
   assert.equal(deps.calls.length, 2);
 });
 
 test("handleDownloadMessage: 設定がオフなら予約があっても全件ダウンロードする", async () => {
-  const msg = {
-    type: "tte-download-images",
-    items: [{ url: "https://pbs.twimg.com/media/a", filename: "a.jpg" }],
-  };
-  const deps = makeDeps({ getSkipExisting: async () => false });
+  const msg = { type: "tte-download-images", items: [item()] };
+  const deps = makeDeps({ getSettings: async () => ({ skipExisting: false }) });
 
-  await handleDownloadMessage(msg, SENDER, deps); // 1通目で予約される
+  await handleDownloadMessage(msg, SENDER, deps);
   const second = await handleDownloadMessage(msg, SENDER, deps);
-  assert.deepEqual(second, { ok: true, started: 1, skipped: 0 });
+  assert.deepEqual(second, { ok: true, started: 1, skipped: 0, failed: 0 });
   assert.equal(deps.calls.length, 2);
 });
 
 test("handleDownloadMessage: 設定の読み出しは1メッセージにつき1回だけ", async () => {
   let getCalls = 0;
   const deps = makeDeps({
-    getSkipExisting: async () => {
+    getSettings: async () => {
       getCalls++;
-      return true;
+      return { skipExisting: true };
     },
   });
   await handleDownloadMessage(
     {
       type: "tte-download-images",
-      items: [
-        { url: "https://pbs.twimg.com/media/a", filename: "a.jpg" },
-        { url: "https://pbs.twimg.com/media/b", filename: "b.jpg" },
-        { url: "https://pbs.twimg.com/media/c", filename: "c.jpg" },
-      ],
+      items: [item({ postId: "1" }), item({ postId: "2" }), item({ postId: "3" })],
     },
     SENDER,
     deps

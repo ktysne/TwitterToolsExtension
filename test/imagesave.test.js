@@ -4,18 +4,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  sanitize,
   mediaIdOf,
   pickFormat,
   origImageUrl,
   resultLabel,
 } = require("../imagesave.js");
-
-test("sanitize: ファイル名に使えない文字を _ に置き換え、60文字に切る", () => {
-  assert.equal(sanitize("alice"), "alice");
-  assert.equal(sanitize('a/b\\c:d*e?f"g<h>i|j'), "a_b_c_d_e_f_g_h_i_j");
-  assert.equal(sanitize("x".repeat(100)).length, 60);
-});
 
 test("mediaIdOf: pbs.twimg.com/media のIDを取り出す", () => {
   assert.equal(
@@ -44,11 +37,19 @@ test("origImageUrl: name=orig の原寸URLを組み立てる", () => {
   );
 });
 
-test("resultLabel: 保存件数とスキップ件数をボタンの文言にする", () => {
+test("resultLabel: 保存件数・スキップ件数・失敗件数をボタンの文言にする", () => {
   assert.equal(resultLabel({ ok: true, started: 2, skipped: 1 }), "✓ 2件(1件済)");
   assert.equal(resultLabel({ ok: true, started: 0, skipped: 3 }), "✓ 保存済み");
   assert.equal(resultLabel({ ok: true, started: 4, skipped: 0 }), "✓ 4件");
   assert.equal(resultLabel({ ok: true, started: 0, skipped: 0 }), "✓ 0件");
+  assert.equal(resultLabel({ ok: true, started: 0, skipped: 0, failed: 1 }), "保存失敗");
+  assert.equal(resultLabel({ ok: true, started: 0, skipped: 2, failed: 1 }), "保存失敗(2件済)");
+  assert.equal(resultLabel({ ok: true, started: 2, skipped: 1, failed: 0 }), "✓ 2件(1件済)");
+  assert.equal(resultLabel({ ok: true, started: 2, skipped: 0, failed: 1 }), "✓ 2件(1件失敗)");
+  assert.equal(
+    resultLabel({ ok: true, started: 2, skipped: 1, failed: 1 }),
+    "✓ 2件(1件済・1件失敗)"
+  );
 });
 
 test("resultLabel: 応答が無い・失敗・旧形式でも壊れない", () => {
