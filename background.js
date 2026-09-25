@@ -223,6 +223,51 @@ function release(filename, token) {
   if (pending.get(filename) === token) pending.delete(filename);
 }
 
+// download() に渡した保存パスを、onDeterminingFilename で指定し直すための対応表（URL → 保存パスの列）。
+// 他の拡張が onDeterminingFilename を登録していると、download() の filename が使われず
+// ダウンロードフォルダ直下に保存されることがあるため、自分の発行分は改めて指定する。
+const intendedPaths = new Map();
+
+function rememberIntendedPath(url, filename) {
+  const entry = { filename };
+  const queue = intendedPaths.get(url) || [];
+  queue.push(entry);
+  intendedPaths.set(url, queue);
+  const timer = setTimeout(() => forgetIntendedPath(url, entry), PENDING_TTL_MS);
+  if (timer && typeof timer.unref === "function") timer.unref();
+  return entry;
+}
+
+function forgetIntendedPath(url, entry) {
+  const queue = intendedPaths.get(url);
+  if (!queue) return;
+  const index = queue.indexOf(entry);
+  if (index >= 0) queue.splice(index, 1);
+  if (queue.length === 0) intendedPaths.delete(url);
+}
+
+function takeIntendedPath(url) {
+  const queue = intendedPaths.get(url);
+  if (!queue) return null;
+  const entry = queue.shift();
+  if (queue.length === 0) intendedPaths.delete(url);
+  return entry.filename;
+}
+
+// onDeterminingFilename のリスナー本体。この拡張が発行したダウンロードにだけ保存パスを返す。
+function suggestIntendedPath(downloadItem, suggest, ownExtensionId) {
+  if (downloadItem && downloadItem.byExtensionId === ownExtensionId) {
+    const filename =
+      takeIntendedPath(downloadItem.url) ||
+      (downloadItem.finalUrl ? takeIntendedPath(downloadItem.finalUrl) : null);
+    if (filename) {
+      suggest({ filename, conflictAction: "uniquify" });
+      return;
+    }
+  }
+  suggest();
+}
+
 // メッセージを受けて検証済みのダウンロードを開始する。
 // 依存（download / fileExists / getSettings）は呼び出し側から差し込める
 // ようにして、ロジックを単体テストできるようにしてある。
@@ -289,6 +334,8 @@ async function runDownload(msg, deps) {
         continue;
       }
     }
+    // onDeterminingFilename は download() の Promise より先に届き得るため、発行前に登録する
+    const intended = rememberIntendedPath(t.url, t.filename);
     try {
       const ret = download({ url: t.url, filename: t.filename, saveAs: false });
       // 発行できたものだけ予約する。download() は同期で戻り、ここまでに
@@ -306,6 +353,7 @@ async function runDownload(msg, deps) {
             () => {
               // 予約を残すと、TTL が切れるまで再試行が無言でスキップされる
               release(t.filename, token);
+              forgetIntendedPath(t.url, intended);
               failed++;
             }
           )
@@ -314,6 +362,7 @@ async function runDownload(msg, deps) {
         started++;
       }
     } catch (_) {
+      forgetIntendedPath(t.url, intended);
       failed++;
     }
   }
@@ -342,6 +391,16 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
   });
 }
 
+if (
+  typeof chrome !== "undefined" &&
+  chrome.downloads &&
+  chrome.downloads.onDeterminingFilename
+) {
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    suggestIntendedPath(downloadItem, suggest, chrome.runtime.id);
+  });
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     safeUrl,
@@ -353,6 +412,10 @@ if (typeof module !== "undefined" && module.exports) {
     hasSameFile,
     makeFileExists,
     handleDownloadMessage,
-    _resetPending: () => pending.clear(), // テストで予約状態を初期化するため
+    suggestIntendedPath,
+    _resetPending: () => {
+      pending.clear();
+      intendedPaths.clear();
+    }, // テストで予約状態を初期化するため
   };
 }
