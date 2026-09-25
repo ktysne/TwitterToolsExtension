@@ -13,6 +13,7 @@ const {
   hasSameFile,
   makeFileExists,
   handleDownloadMessage,
+  suggestIntendedPath,
   _resetPending,
 } = require("../background.js");
 
@@ -585,4 +586,74 @@ test("handleDownloadMessage: 設定の読み出しは1メッセージにつき1�
     deps
   );
   assert.equal(getCalls, 1);
+});
+
+const OWN_ID = "own-extension";
+
+function determine(downloadItem) {
+  const suggestions = [];
+  suggestIntendedPath(downloadItem, (s) => suggestions.push(s), OWN_ID);
+  return suggestions;
+}
+
+test("suggestIntendedPath: 発行したダウンロードには保存パスを指定し直す", async () => {
+  const deps = makeDeps();
+  await handleDownloadMessage(
+    { type: "tte-download-images", items: [item({ screenName: "alice" })] },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(
+    determine({ byExtensionId: OWN_ID, url: deps.calls[0].url }),
+    [{ filename: "TwitterMedia/alice_1_a.jpg", conflictAction: "uniquify" }]
+  );
+});
+
+test("suggestIntendedPath: 他の拡張やブラウザのダウンロードには指定しない", async () => {
+  const deps = makeDeps();
+  await handleDownloadMessage(
+    { type: "tte-download-images", items: [item()] },
+    SENDER,
+    deps
+  );
+  const url = deps.calls[0].url;
+  assert.deepEqual(determine({ byExtensionId: "other", url }), [undefined]);
+  assert.deepEqual(determine({ url }), [undefined]);
+});
+
+test("suggestIntendedPath: 同じURLの発行は発行順に1回ずつ保存パスを返す", async () => {
+  const deps = makeDeps({ getSettings: async () => ({ skipExisting: false }) });
+  const msg = { type: "tte-download-images", items: [item()] };
+  await handleDownloadMessage(msg, SENDER, deps);
+  await handleDownloadMessage(
+    msg,
+    SENDER,
+    makeDeps({
+      calls: deps.calls,
+      download: (opts) => deps.calls.push(opts),
+      getSettings: async () => ({ skipExisting: false, saveDir: "Other" }),
+    })
+  );
+  const url = deps.calls[0].url;
+  assert.equal(determine({ byExtensionId: OWN_ID, url })[0].filename, "TwitterMedia/a_1_a.jpg");
+  assert.equal(determine({ byExtensionId: OWN_ID, url })[0].filename, "Other/a_1_a.jpg");
+  assert.deepEqual(determine({ byExtensionId: OWN_ID, url }), [undefined]);
+});
+
+test("suggestIntendedPath: 開始に失敗したダウンロードの保存パスは残さない", async () => {
+  const deps = makeDeps({
+    download: (opts) => {
+      deps.calls.push(opts);
+      return Promise.reject(new Error("start failed"));
+    },
+  });
+  await handleDownloadMessage(
+    { type: "tte-download-images", items: [item()] },
+    SENDER,
+    deps
+  );
+  assert.deepEqual(
+    determine({ byExtensionId: OWN_ID, url: deps.calls[0].url }),
+    [undefined]
+  );
 });
