@@ -150,8 +150,23 @@
     }
   }
 
+  function outermostArticle(article) {
+    let outer = article;
+    for (let ancestor = article.parentElement && article.parentElement.closest("article"); ancestor; ancestor = ancestor.parentElement && ancestor.parentElement.closest("article")) {
+      outer = ancestor;
+    }
+    return outer;
+  }
+
   function evaluate(node) {
     if (node.matches("article")) {
+      // 引用先の代替表示などの入れ子 article が同じセルを別の判定で上書きすると、
+      // 隠す・戻すが MutationObserver 経由で無限に繰り返されるため、外側の投稿だけで判定する。
+      const outer = outermostArticle(node);
+      if (outer !== node) {
+        evaluate(outer);
+        return;
+      }
       const link = statusLink(node);
       const href = link && link.getAttribute("href");
       const text = tweetTextElement(node);

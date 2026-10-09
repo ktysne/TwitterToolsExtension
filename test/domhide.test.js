@@ -255,6 +255,21 @@ test("引用カード内の本文だけがワードに一致しても投稿を�
   assert.equal(post.cell.classList.contains("tte-hidden"), false);
 });
 
+test("入れ子の article は外側の投稿の判定でセルを隠したままにする", () => {
+  const f = browserFixture({ wordMute: true, muteWords: ["outerword"] });
+  const post = f.article("203", "outerword");
+  const quote = post.post.appendChild(new f.Element("div", { role: "link" }));
+  const tombstone = quote.appendChild(new f.Element("article"));
+  tombstone.appendChild(new f.Element("span", {}, "このポストは表示できません。"));
+  f.root.appendChild(post.cell);
+  f.mutate(f.root, [post.cell]);
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+  f.mutate(tombstone);
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+  f.scan();
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+});
+
 test("リポストと判別した文脈の handle だけを @id で隠す", () => {
   const f = browserFixture({ handleMute: true, muteHandles: ["@iconposter", "@textposter", "@likedposter", "@origin", "@user"] });
   function addContext(post, handle, text, iconPath) {
