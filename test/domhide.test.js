@@ -137,6 +137,7 @@ function browserFixture(cfg) {
       });
     }
     closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+    contains(node) { return !!node && (node === this || this.contains(node.parentElement)); }
     querySelectorAll(selector) {
       return this.children.flatMap((child) => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
     }

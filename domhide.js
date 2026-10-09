@@ -58,7 +58,7 @@
   const RESERVED_PATHS = new Set(["home", "explore", "search", "notifications", "messages", "settings", "i", "intent", "compose", "login", "logout", "signup", "tos", "privacy", "about", "help", "jobs", "download"]);
   // リポストのアイコンと文言は X の DOM 表現に依存する。
   const REPOST_ICON_PATH_PREFIX = "M4.75 3.79l4.603 4.3";
-  const REPOST_CONTEXT_TEXT = /リポスト|リツイート|reposted|retweeted/i;
+  const REPOST_CONTEXT_TEXT = /(リポスト|リツイート)(しました)?$|\b(reposted|retweeted)$/i;
 
   function handleFromHref(href, profileOnly = false) {
     const path = xPathFromHref(href);
@@ -75,7 +75,10 @@
 
   function tweetTextElement(article) {
     return [...article.querySelectorAll('[data-testid="tweetText"]')]
-      .find((element) => !element.closest('div[role="link"]')) || null;
+      .find((element) => {
+        const quote = element.closest('div[role="link"]');
+        return !quote || !article.contains(quote);
+      }) || null;
   }
 
   if (typeof module !== "undefined" && module.exports) {
@@ -109,14 +112,14 @@
     for (const context of article.querySelectorAll('[data-testid="socialContext"]')) {
       let hasRepostIcon = false;
       let ancestor = context;
-      for (let depth = 0; ancestor && depth <= 6; depth += 1, ancestor = ancestor.parentElement) {
+      // article 自身は操作バーのアイコンまで含むため走査しない。
+      for (let depth = 0; ancestor && depth <= 6 && !ancestor.matches("article"); depth += 1, ancestor = ancestor.parentElement) {
         if ([...ancestor.querySelectorAll("svg path[d]")].some((path) => path.getAttribute("d").startsWith(REPOST_ICON_PATH_PREFIX))) {
           hasRepostIcon = true;
           break;
         }
-        if (ancestor.matches("article")) break;
       }
-      if (!hasRepostIcon && !REPOST_CONTEXT_TEXT.test(context.textContent || "")) continue;
+      if (!hasRepostIcon && !REPOST_CONTEXT_TEXT.test((context.textContent || "").trim())) continue;
       const links = [...context.querySelectorAll("a[href]")];
       const enclosing = context.closest("a[href]");
       if (enclosing) links.push(enclosing);
