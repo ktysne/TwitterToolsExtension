@@ -1,15 +1,5 @@
-/*
- * bridge.js  —  runs in the ISOLATED world (document_start)
- *
- * MAIN world の interceptor.js は chrome.* API を使えないため、
- * このスクリプトが設定の橋渡しをする（共有DOMが通信路）:
- *   - enabled         → <html data-tte-enabled>    ブロック/ミュート除外フィルタ
- *   - disableAutoplay → <html data-tte-autoplay>   動画の自動再生停止
- *   - cleanLink       → <html data-tte-cleanlink>  コピーするリンクの追跡パラメータ除去
- *   - wordMute / muteWords / muteRegexes / handleMute / muteHandles
- *                     → <div id="__tteMuteRules">  ワード・@id ミュートのルール(JSON)
- * また popup からの「このタブで何件除外した?」問い合わせに応答する。
- */
+// ISOLATED world から機能のオン/オフだけを MAIN world の DOM 属性へ渡す。
+// ポップアップには relationship の除外累計と DOM 非表示の累計を合算して返す。
 (() => {
   "use strict";
 
@@ -17,11 +7,6 @@
     enabled: true,
     disableAutoplay: true,
     cleanLink: true,
-    wordMute: true,
-    muteWords: [],
-    muteRegexes: [],
-    handleMute: true,
-    muteHandles: [],
   };
 
   function apply(cfg) {
@@ -41,34 +26,8 @@
     } catch (_) {}
   }
 
-  // ワードミュートのルールは件数が多くなりうるので属性ではなく専用ノードに置く
-  function muteNode() {
-    let n = document.getElementById("__tteMuteRules");
-    if (!n) {
-      n = document.createElement("div");
-      n.id = "__tteMuteRules";
-      n.style.display = "none";
-      (document.documentElement || document).appendChild(n);
-    }
-    return n;
-  }
-
-  function applyMute(cfg) {
-    try {
-      muteNode().textContent = JSON.stringify({
-        enabled: !!cfg.wordMute,
-        words: Array.isArray(cfg.muteWords) ? cfg.muteWords : [],
-        regexes: Array.isArray(cfg.muteRegexes) ? cfg.muteRegexes : [],
-        handleEnabled: !!cfg.handleMute,
-        handles: Array.isArray(cfg.muteHandles) ? cfg.muteHandles : [],
-      });
-    } catch (_) {}
-  }
-
-  // 初期状態を反映（既定: すべて有効、ワードリストは空）
   chrome.storage.local.get(DEFAULTS, (cfg) => {
     apply(cfg);
-    applyMute(cfg);
   });
 
   // popup での変更を即反映
@@ -92,32 +51,14 @@
         changes.cleanLink.newValue ? "1" : "0"
       );
     }
-    // ミュート系の項目は相互に関係するので、変化があれば一括で読み直す
-    if (
-      changes.wordMute ||
-      changes.muteWords ||
-      changes.muteRegexes ||
-      changes.handleMute ||
-      changes.muteHandles
-    ) {
-      chrome.storage.local.get(
-        {
-          wordMute: true,
-          muteWords: [],
-          muteRegexes: [],
-          handleMute: true,
-          muteHandles: [],
-        },
-        (cfg) => applyMute(cfg)
-      );
-    }
   });
 
   // popup からの「このタブで何件除外した?」問い合わせ
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "tte-get-count") {
       const v = document.documentElement.getAttribute("data-tte-removed");
-      sendResponse({ total: v ? parseInt(v, 10) || 0 : 0 });
+      const domRemoved = globalThis.__tteDomMuteCount?.() || 0;
+      sendResponse({ total: (v ? parseInt(v, 10) || 0 : 0) + domRemoved });
       // 同期で応答済み。チャネルを開いたままにしない。
     }
     // 無関係なメッセージはここでは応答しない（他のリスナに委ねる）

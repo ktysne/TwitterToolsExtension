@@ -13,7 +13,7 @@ ISOLATED world で `window.fetch` を上書きしても、ページ本体の fet
 そこで、役割を 2 つのスクリプトに分けている。
 
 - **MAIN world**(`interceptor.js`)：ページと同じ世界で動き、`fetch` と `XMLHttpRequest`、`HTMLMediaElement.prototype.play` をフックする。
-- **ISOLATED world**(`bridge.js`、`imagesave.js`、`mutemenu.js`、`domhide.js`)：`chrome.*` API を使い、設定の読み書き、保存依頼、メニューへの項目追加、描画済み投稿の即時非表示を行う。
+- **ISOLATED world**(`bridge.js`、`imagesave.js`、`mutemenu.js`、`domhide.js`)：`chrome.*` API を使い、設定の読み書き、保存依頼、メニューへの項目追加、ワード/@id による投稿とユーザーセルの非表示を行う。
 
 `manifest.json` の `content_scripts` で、前者に `"world": "MAIN"` を指定して注入している。
 
@@ -26,7 +26,7 @@ ISOLATED world はページの `fetch` をフックできない。
 - `data-tte-enabled`：ブロック/ミュート除外フィルタのオン/オフ。
 - `data-tte-autoplay`：動画の自動再生停止のオン/オフ。
 - `data-tte-cleanlink`：コピーするリンクの追跡パラメータ除去のオン/オフ。
-- `data-tte-removed`：そのフレームで除外した投稿の累計件数。各フレームが個別に積算し、ポップアップはトップフレーム(frameId 0)の値を読む。
+- `data-tte-removed`：そのフレームで relationship によりレスポンスから除外した累計件数。
 
 設定は `bridge.js` が `chrome.storage` から読み、上記の属性へ書き込む。
 `interceptor.js` は通信のたびにこの属性を読んで挙動を決める。
@@ -34,18 +34,21 @@ ISOLATED world はページの `fetch` をフックできない。
 動画の保存URLだけは件数が多いため、属性ではなく `<div id="__tteVideoMap">` の中に JSON で置く。
 `interceptor.js` が書き、`imagesave.js` が読む。
 
-ワード/@id ミュートのルール（オン/オフ、ワード、正規表現、@id）も件数が多くなりうるため、`<div id="__tteMuteRules">` に JSON で置く。
-`bridge.js` が `chrome.storage` の内容を書き、`interceptor.js` がレスポンスのたびに読む。
-`interceptor.js` は JSON 文字列が変わったときだけ正規表現をコンパイルして使い回す。
+ワード/@id ミュートの一覧は拡張機能の保存領域と ISOLATED world の変数にだけ置き、MAIN world と共有 DOM へ渡さない。
+`domhide.js` が描画された投稿とユーザーセルを判定する。
+DOM 非表示の累計は投稿 ID とユーザー handle で重複を除き、同じフレームの ISOLATED world の共有グローバルで `bridge.js` に渡す。
+`bridge.js` は relationship の累計と合算し、ポップアップからの `tte-get-count` に答える。
+ポップアップはトップフレーム（frameId 0）の件数だけを読む。
+長文の省略部分や初期設定読み込み前などの制約は [word-mute.md](word-mute.md) を参照。
 
 ## 各スクリプトの責務
 
-- `interceptor.js`：GraphQL のタイムライン系レスポンスから、ブロック/ミュート対象とワード/@id ミュートに一致する投稿を取り除く。動画のmp4 URLを集める。動画の自動再生を抑止する。コピー時に、単一の X の URL から追跡パラメータ(`s` / `t` など)を取り除く(`copy` イベントと `navigator.clipboard.writeText` のフック)。
-- `bridge.js`：設定を data 属性へ、ミュートのルールを `__tteMuteRules` へ反映する。ポップアップからの件数問い合わせに答える。
+- `interceptor.js`：GraphQL のタイムライン系レスポンスから、relationship によるブロック/ミュート対象を取り除く。動画のmp4 URLを集める。動画の自動再生を抑止する。コピー時に、単一の X の URL から追跡パラメータ(`s` / `t` など)を取り除く(`copy` イベントと `navigator.clipboard.writeText` のフック)。
+- `bridge.js`：機能のオン/オフだけを data 属性へ反映する。relationship と DOM 非表示の累計を合算し、ポップアップからの件数問い合わせに答える。
 - `imagesave.js`：メディア投稿に保存ボタンを設置し、保存対象のURLとファイル名の材料となるメタデータを集めて `background.js` へ送る。ファイル名と保存パスは組み立てない。
 - `savepath.js`：ファイル名形式の展開、保存先パスの検証、パス解決を行う副作用のない共有モジュール。`background.js`、`popup.js`（`popup.html` から読み込む）、テストから使われる。
 - `mutemenu.js`：投稿の ⋯ メニューに「拡張機能でミュート」項目を足し、クリックで著者の @id を `muteHandles` に追加/解除する。
-- `domhide.js`：ワード/@id ミュートのルールが変わったとき、すでに描画済みの一致する投稿を DOM 上で即座に隠す(新規読み込み分は `interceptor.js` が処理する)。
+- `domhide.js`：ワード/@id ミュートの唯一の判定箇所。新規投稿を MutationObserver 内で同期的に隠す。描画済みの投稿とユーザーセルを設定変更時とデバウンス走査で再評価し、非表示の累計を管理する。
 - `background.js`：受け取ったメタデータと設定からファイル名と保存パスを組み立てて検証し、`chrome.downloads` で保存する。ファイル名の組み立てと検証をここに集中させるのは、設定の読み出し、DOM 由来の値の検証、保存パスの決定を、ダウンロードを発行する 1 箇所で行うためである。コンテンツスクリプトは `chrome.downloads` を直接呼べないため、ここが実行役になる。
 - `popup.html` と `popup.js`：各機能のトグル、メディアの保存先フォルダとファイル名形式、ワード・@id ミュートの入力欄、現在のタブでのミュート件数を表示する。
 
@@ -75,11 +78,10 @@ X はレスポンスを自前のリスナで読むため、`send` 内で後か�
 
 ## テスト可能性
 
-除外判定（`filterPayload` / `itemContentIsBad` など）は、設定を `ctx = { relOn, rules }`
-として引数で受け取る純粋関数にしてある。DOM(`<html data-tte-enabled>` や
-`__tteMuteRules`)を読むのはレスポンスごとに 1 度だけで、その結果を `ctx` に詰めて
-再帰に渡す。同様に、保存URLの検証(`background.js`)や保存先パスと保存名の検証・組み立て
-(`savepath.js`)も DOM やネットワークに依存しない関数に分けてある。
+relationship の除外判定（`filterPayload` / `itemContentIsBad` など）は、設定を `ctx = { relOn }` として引数で受け取る純粋関数にしてある。
+`filterPayload` はレスポンスごとに `data-tte-enabled` を読み、結果を再帰に渡す。
+ワード/@id の正規化・コンパイル、本文一致とリンクからの handle 抽出は `domhide.js` の純粋関数で行う。
+保存URLの検証（`background.js`）や保存先パスと保存名の検証・組み立て（`savepath.js`）も DOM やネットワークに依存しない関数に分けてある。
 
 これらの関数は Node から `require` して `node:test` で検証している。
 各スクリプトは、ブラウザ API を触る副作用を「その API があるときだけ」実行するよう
