@@ -344,3 +344,24 @@ test("非表示セルから article が取り除かれたら同期で非表示�
   f.mutate(post.cell);
   assert.equal(post.cell.classList.contains("tte-hidden"), false);
 });
+
+test("全件の走査は隠し続けるセルのクラスを付け外しせず、一致しなくなったセルだけ戻す", () => {
+  const f = browserFixture({ wordMute: true, muteWords: ["keepword"] });
+  const kept = f.article("501", "keepword");
+  const dropped = f.article("502", "keepword");
+  for (const post of [kept, dropped]) f.root.appendChild(post.cell);
+  f.mutate(f.root, [kept.cell, dropped.cell]);
+  f.scan();
+  const writes = [];
+  for (const cell of [kept.cell, dropped.cell]) {
+    const { add, remove } = cell.classList;
+    cell.classList.add = (name) => { writes.push(["add", cell, name]); add(name); };
+    cell.classList.remove = (name) => { writes.push(["remove", cell, name]); remove(name); };
+  }
+  dropped.cell.removeChild(dropped.post);
+  f.mutate(f.root, []);
+  f.scan();
+  assert.equal(kept.cell.classList.contains("tte-hidden"), true);
+  assert.equal(dropped.cell.classList.contains("tte-hidden"), false);
+  assert.deepEqual(writes, [["remove", dropped.cell, "tte-hidden"]]);
+});

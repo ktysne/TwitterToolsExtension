@@ -90,6 +90,7 @@
   const removedPosts = new Set();
   const removedUsers = new Set();
   const hiddenTargets = new Set();
+  let hiddenInPass = null;
   // 同じフレームの content script 間だけで共有し、件数を DOM に書き出さない。
   globalThis.__tteDomMuteCount = () => removedPosts.size + removedUsers.size;
 
@@ -143,8 +144,9 @@
 
   function setHidden(target, bad) {
     if (bad) {
-      target.classList.add("tte-hidden");
+      if (!target.classList.contains("tte-hidden")) target.classList.add("tte-hidden");
       hiddenTargets.add(target);
+      if (hiddenInPass) hiddenInPass.add(target);
     } else if (hiddenTargets.delete(target)) {
       target.classList.remove("tte-hidden");
     }
@@ -193,11 +195,19 @@
     for (const target of targets) evaluate(target);
   }
 
+  // 隠し続ける対象のクラスは付け外ししない。走査で一致しなかった対象(DOM から外れたものを含む)だけ戻す。
   function applyAll() {
     ensureStyle();
-    for (const target of hiddenTargets) target.classList.remove("tte-hidden");
-    hiddenTargets.clear();
-    for (const node of document.querySelectorAll(TARGET_SELECTOR)) evaluate(node);
+    const stillHidden = new Set();
+    hiddenInPass = stillHidden;
+    try {
+      for (const node of document.querySelectorAll(TARGET_SELECTOR)) evaluate(node);
+    } finally {
+      hiddenInPass = null;
+    }
+    for (const target of [...hiddenTargets]) {
+      if (!stillHidden.has(target)) setHidden(target, false);
+    }
   }
 
   function loadRules() {

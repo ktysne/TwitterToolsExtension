@@ -167,6 +167,12 @@
     return `✓ ${started}件${details.length ? `(${details.join("・")})` : ""}`;
   }
 
+  // 同じ値でも書き込むと MutationObserver が拾って scan が 250ms ごとに続くため、変化したときだけ書く。
+  function syncLabel(button, label) {
+    if (button.dataset.tteLabel !== label) button.dataset.tteLabel = label;
+    if (!button.disabled && button.textContent !== label) button.textContent = label;
+  }
+
   function makeButton(label, getItems, missText) {
     const btn = document.createElement("button");
     btn.className = "tte-saveall";
@@ -253,9 +259,7 @@
       ":scope > .tte-saveall-wrap .tte-saveall"
     );
     if (existing) {
-      const lbl = labelFor();
-      existing.dataset.tteLabel = lbl;
-      if (!existing.disabled) existing.textContent = lbl;
+      syncLabel(existing, labelFor());
       return;
     }
 
@@ -313,6 +317,6 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { mediaIdOf, pickFormat, origImageUrl, resultLabel };
+    module.exports = { mediaIdOf, pickFormat, origImageUrl, resultLabel, syncLabel };
   }
 })();
