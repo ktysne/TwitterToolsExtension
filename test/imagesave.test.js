@@ -8,6 +8,7 @@ const {
   pickFormat,
   origImageUrl,
   resultLabel,
+  syncLabel,
 } = require("../imagesave.js");
 
 test("mediaIdOf: pbs.twimg.com/media のIDを取り出す", () => {
@@ -58,4 +59,42 @@ test("resultLabel: 応答が無い・失敗・旧形式でも壊れない", () =
   assert.equal(resultLabel({ ok: false, started: 0 }), "保存失敗");
   // skipped が無い旧形式の応答は従来どおりの表示
   assert.equal(resultLabel({ ok: true, started: 3 }), "✓ 3件");
+});
+
+function fakeButton(label, disabled = false) {
+  const writes = [];
+  let text = label;
+  const dataset = {};
+  let tteLabel = label;
+  Object.defineProperty(dataset, "tteLabel", {
+    get: () => tteLabel,
+    set: (value) => { writes.push("label"); tteLabel = value; },
+  });
+  return {
+    disabled,
+    dataset,
+    writes,
+    get textContent() { return text; },
+    set textContent(value) { writes.push("text"); text = value; },
+  };
+}
+
+test("syncLabel: ラベルが同じなら書き込まない", () => {
+  const button = fakeButton("⬇ 全2枚保存");
+  syncLabel(button, "⬇ 全2枚保存");
+  assert.deepEqual(button.writes, []);
+});
+
+test("syncLabel: ラベルが変わったら保存先と表示を更新し、保存中の表示は残す", () => {
+  const button = fakeButton("⬇ 動画を保存");
+  syncLabel(button, "⬇ メディア3件を保存");
+  assert.equal(button.dataset.tteLabel, "⬇ メディア3件を保存");
+  assert.equal(button.textContent, "⬇ メディア3件を保存");
+
+  const busy = fakeButton("⬇ 動画を保存", true);
+  busy.textContent = "保存中…";
+  busy.writes.length = 0;
+  syncLabel(busy, "⬇ 動画2本を保存");
+  assert.equal(busy.dataset.tteLabel, "⬇ 動画2本を保存");
+  assert.equal(busy.textContent, "保存中…");
 });
