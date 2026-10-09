@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeHandle, compileMuteRules, textMatchesMute, handleMatchesMute, handleFromHref, postIdFromHref } = require("../domhide.js");
+const { normalizeHandle, compileMuteRules, textMatchesMute, tweetTextContent, handleMatchesMute, handleFromHref, postIdFromHref } = require("../domhide.js");
 
 test("ワードは小文字化し、空要素を除いて部分一致する", () => {
   const rules = compileMuteRules({ wordMute: true, muteWords: ["Spam", "", "  "] });
@@ -19,6 +19,13 @@ test("正規表現は大小を無視し、不正な行だけを無視する", ()
   assert.equal(textMatchesMute("SPAM42", rules), true);
   assert.equal(textMatchesMute("year 2026", rules), true);
   assert.equal(textMatchesMute("clean", rules), false);
+});
+
+test("本文のテキストノードと画像の alt を連結する", () => {
+  const text = (nodeValue) => ({ nodeType: 3, nodeValue });
+  const image = { nodeType: 1, tagName: "IMG", getAttribute: (name) => name === "alt" ? "😀" : null };
+  const span = { nodeType: 1, tagName: "SPAN", childNodes: [text("world")] };
+  assert.equal(tweetTextContent({ childNodes: [text("hello "), image, text(" "), span] }), "hello 😀 world");
 });
 
 test("@id は先頭の @ を一つだけ外し、小文字で完全一致する", () => {
@@ -79,28 +86,52 @@ function browserFixture(cfg) {
   const vm = require("node:vm");
   const fs = require("node:fs");
   const path = require("node:path");
+  class TextNode {
+    constructor(text) { this.nodeType = 3; this.nodeValue = String(text); }
+    get textContent() { return this.nodeValue; }
+    set textContent(value) { this.nodeValue = String(value); }
+  }
   class Element {
     constructor(tag, attrs = {}, text = "") {
-      this.tag = tag;
+      this.tag = tag.toLowerCase();
+      this.tagName = this.tag.toUpperCase();
       this.attrs = { ...attrs };
-      this.textContent = text;
       this.children = [];
+      this.childNodes = [];
       this.nodeType = 1;
       const classes = new Set();
       this.classList = { add: (s) => classes.add(s), remove: (s) => classes.delete(s), contains: (s) => classes.has(s) };
+      this.textContent = text;
     }
     appendChild(child) {
       child.parentElement = this;
-      this.children.push(child);
+      this.childNodes.push(child);
+      if (child.nodeType === 1) this.children.push(child);
+      return child;
+    }
+    removeChild(child) {
+      this.childNodes = this.childNodes.filter((node) => node !== child);
+      this.children = this.children.filter((node) => node !== child);
+      child.parentElement = null;
       return child;
     }
     get isConnected() { return this.tag === "html" || !!this.parentElement?.isConnected; }
     getAttribute(name) { return this.attrs[name] ?? null; }
     setAttribute(name, value) { this.attrs[name] = value; }
+    get textContent() { return this.childNodes.map((node) => node.textContent || "").join(""); }
+    set textContent(value) {
+      for (const child of this.childNodes) child.parentElement = null;
+      this.children = [];
+      this.childNodes = [];
+      if (String(value)) this.appendChild(new TextNode(value));
+    }
     matches(selector) {
-      return selector.split(", ").some((part) => {
+      return selector.split(",").map((part) => part.trim()).some((part) => {
+        if (part === "svg path[d]") return this.tag === "path" && this.attrs.d != null && !!this.parentElement?.closest("svg");
         if (part === "a[href]") return this.tag === "a" && this.attrs.href != null;
         if (part === 'a[href*="/status/"]') return this.tag === "a" && (this.attrs.href || "").includes("/status/");
+        if (part === 'div[role="link"]') return this.tag === "div" && this.attrs.role === "link";
+        if (part === "img[alt]") return this.tag === "img" && this.attrs.alt != null;
         const match = part.match(/^\[data-testid="(.+)"\]$/);
         return match ? this.attrs["data-testid"] === match[1] : this.tag === part;
       });
@@ -116,9 +147,10 @@ function browserFixture(cfg) {
   let message;
   let timer;
   let observeTarget;
+  const root = new Element("html");
   const document = {
     nodeType: 9,
-    documentElement: null,
+    documentElement: root,
     createElement: (tag) => new Element(tag),
     querySelectorAll: (selector) => document.documentElement?.querySelectorAll(selector) || [],
   };
@@ -141,7 +173,6 @@ function browserFixture(cfg) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, "..", file), "utf8"), context);
   }
   assert.equal(observeTarget, document);
-  const root = document.documentElement = new Element("html");
   function article(id, text, author = "author") {
     const cell = new Element("div", { "data-testid": "cellInnerDiv" });
     const post = cell.appendChild(new Element("article"));
@@ -151,7 +182,7 @@ function browserFixture(cfg) {
     return { cell, post, body, link };
   }
   return {
-    Element, root, article, context,
+    Element, TextNode, root, article, context,
     mutate: (target, addedNodes = []) => observer([{ target, addedNodes }]),
     scan: () => { const cb = timer; timer = null; cb(); },
     update: (newCfg) => {
@@ -202,25 +233,98 @@ test("追加ノードの祖先と本文・href の再利用を同期判定する
   assert.equal(f.count(), 2);
 });
 
-test("リツイートした人と元投稿の著者、ユーザーセルを @id で隠す", () => {
-  const f = browserFixture({ handleMute: true, muteHandles: ["@reposter", "@origin", "@user"] });
-  const repost = f.article("101", "clean");
-  const contextLink = repost.post.appendChild(new f.Element("a", { href: "/Reposter" }));
-  contextLink.appendChild(new f.Element("span", { "data-testid": "socialContext" }));
-  const original = f.article("102", "clean", "Origin");
+test("本文の絵文字 alt がワードに一致すると投稿を隠す", () => {
+  const f = browserFixture({ wordMute: true, muteWords: ["😀"] });
+  const post = f.article("201", "plain text");
+  post.body.appendChild(new f.Element("img", { alt: "😀" }));
+  f.root.appendChild(post.cell);
+  f.mutate(f.root, [post.cell]);
+  assert.equal(post.body.textContent, "plain text");
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+});
+
+test("引用カード内の本文だけがワードに一致しても投稿を隠さない", () => {
+  const f = browserFixture({ wordMute: true, muteWords: ["quotedword"] });
+  const post = f.article("202", "outer text");
+  post.post.removeChild(post.body);
+  const quote = post.post.appendChild(new f.Element("div", { role: "link" }));
+  quote.appendChild(new f.Element("div", { "data-testid": "tweetText" }, "quotedword"));
+  f.root.appendChild(post.cell);
+  f.mutate(f.root, [post.cell]);
+  assert.equal(post.cell.classList.contains("tte-hidden"), false);
+});
+
+test("リポストと判別した文脈の handle だけを @id で隠す", () => {
+  const f = browserFixture({ handleMute: true, muteHandles: ["@iconposter", "@textposter", "@likedposter", "@origin", "@user"] });
+  function addContext(post, handle, text, iconPath) {
+    const wrapper = post.post.appendChild(new f.Element("div"));
+    const contextLink = wrapper.appendChild(new f.Element("a", { href: `/${handle}` }));
+    contextLink.appendChild(new f.Element("span", { "data-testid": "socialContext" }, text));
+    if (iconPath) {
+      const svg = wrapper.appendChild(new f.Element("svg"));
+      svg.appendChild(new f.Element("path", { d: iconPath }));
+    }
+  }
+  const iconRepost = f.article("101", "clean");
+  addContext(iconRepost, "IconPoster", "IconPosterさん", "M4.75 3.79l4.603 4.3 rest-of-path");
+  const textRepost = f.article("102", "clean");
+  addContext(textRepost, "TextPoster", "TextPosterさんがリポスト");
+  const like = f.article("103", "clean");
+  addContext(like, "LikedPoster", "LikedPosterさんがいいねしました");
+  const original = f.article("104", "clean", "Origin");
   const user = new f.Element("div", { "data-testid": "UserCell" });
   user.appendChild(new f.Element("a", { href: "/search?q=user" }));
   user.appendChild(new f.Element("a", { href: "https://x.com/User" }));
-  for (const node of [repost.cell, original.cell, user]) f.root.appendChild(node);
-  f.mutate(f.root, [repost.cell, original.cell, user]);
-  for (const node of [repost.cell, original.cell, user]) assert.equal(node.classList.contains("tte-hidden"), true);
-  assert.equal(f.count(), 3);
+  for (const node of [iconRepost.cell, textRepost.cell, like.cell, original.cell, user]) f.root.appendChild(node);
+  f.mutate(f.root, [iconRepost.cell, textRepost.cell, like.cell, original.cell, user]);
+  for (const node of [iconRepost.cell, textRepost.cell, original.cell, user]) assert.equal(node.classList.contains("tte-hidden"), true);
+  assert.equal(like.cell.classList.contains("tte-hidden"), false);
+  assert.equal(f.count(), 4);
   f.scan();
-  assert.equal(f.count(), 3);
+  assert.equal(f.count(), 4);
   user.children[1].setAttribute("href", "/other");
   f.mutate(user.children[1]);
   assert.equal(user.classList.contains("tte-hidden"), false);
   f.update({ handleMute: false });
-  assert.equal(repost.cell.classList.contains("tte-hidden"), false);
+  assert.equal(iconRepost.cell.classList.contains("tte-hidden"), false);
+  assert.equal(textRepost.cell.classList.contains("tte-hidden"), false);
+  assert.equal(like.cell.classList.contains("tte-hidden"), false);
   assert.equal(original.cell.classList.contains("tte-hidden"), false);
+});
+
+test("ミュート設定を読み込んでもワード・正規表現・@id を DOM に書かない", () => {
+  const f = browserFixture({
+    wordMute: true,
+    muteWords: ["targetbody", "neverleakword"],
+    muteRegexes: ["privatepattern\\d{3}"],
+    handleMute: true,
+    muteHandles: ["@privateconfighandle"],
+  });
+  const post = f.article("301", "targetbody");
+  f.root.appendChild(post.cell);
+  f.mutate(f.root, [post.cell]);
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+
+  const rendered = [];
+  function collect(element) {
+    rendered.push(...Object.values(element.attrs), element.textContent);
+    for (const child of element.children) collect(child);
+  }
+  collect(f.root);
+  for (const rule of ["neverleakword", "privatepattern\\d{3}", "@privateconfighandle"]) {
+    assert.equal(rendered.some((value) => String(value).includes(rule)), false, `DOM に ${rule} が含まれない`);
+  }
+});
+
+test("非表示セルから article が取り除かれたら同期で非表示を解除する", () => {
+  const f = browserFixture({ wordMute: true, muteWords: ["hiddenword"] });
+  const post = f.article("401", "hiddenword");
+  f.root.appendChild(post.cell);
+  f.mutate(f.root, [post.cell]);
+  assert.equal(post.cell.classList.contains("tte-hidden"), true);
+
+  post.cell.removeChild(post.post);
+  post.cell.appendChild(new f.Element("div", {}, "replacement"));
+  f.mutate(post.cell);
+  assert.equal(post.cell.classList.contains("tte-hidden"), false);
 });

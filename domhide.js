@@ -25,6 +25,23 @@
     return rules.words.some((w) => lower.includes(w)) || rules.regexes.some((re) => re.test(text));
   }
 
+  function tweetTextContent(element) {
+    let text = "";
+    for (const node of element ? element.childNodes || [] : []) {
+      if (node.nodeType === 3) {
+        text += node.nodeValue || "";
+      } else if (node.nodeType === 1) {
+        if (node.tagName === "IMG") {
+          const alt = node.getAttribute("alt");
+          if (alt !== null) text += alt;
+        } else {
+          text += tweetTextContent(node);
+        }
+      }
+    }
+    return text;
+  }
+
   function handleMatchesMute(handle, rules) {
     return !!handle && rules.handles.has(normalizeHandle(handle));
   }
@@ -39,6 +56,9 @@
   }
 
   const RESERVED_PATHS = new Set(["home", "explore", "search", "notifications", "messages", "settings", "i", "intent", "compose", "login", "logout", "signup", "tos", "privacy", "about", "help", "jobs", "download"]);
+  // リポストのアイコンと文言は X の DOM 表現に依存する。
+  const REPOST_ICON_PATH_PREFIX = "M4.75 3.79l4.603 4.3";
+  const REPOST_CONTEXT_TEXT = /リポスト|リツイート|reposted|retweeted/i;
 
   function handleFromHref(href, profileOnly = false) {
     const path = xPathFromHref(href);
@@ -53,8 +73,13 @@
     return match ? match[1] : null;
   }
 
+  function tweetTextElement(article) {
+    return [...article.querySelectorAll('[data-testid="tweetText"]')]
+      .find((element) => !element.closest('div[role="link"]')) || null;
+  }
+
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { normalizeHandle, compileMuteRules, textMatchesMute, handleMatchesMute, handleFromHref, postIdFromHref };
+    module.exports = { normalizeHandle, compileMuteRules, textMatchesMute, tweetTextContent, handleMatchesMute, handleFromHref, postIdFromHref };
   }
   if (typeof document === "undefined" || typeof chrome === "undefined") return;
 
@@ -82,6 +107,16 @@
   function repostHandles(article) {
     const handles = [];
     for (const context of article.querySelectorAll('[data-testid="socialContext"]')) {
+      let hasRepostIcon = false;
+      let ancestor = context;
+      for (let depth = 0; ancestor && depth <= 6; depth += 1, ancestor = ancestor.parentElement) {
+        if ([...ancestor.querySelectorAll("svg path[d]")].some((path) => path.getAttribute("d").startsWith(REPOST_ICON_PATH_PREFIX))) {
+          hasRepostIcon = true;
+          break;
+        }
+        if (ancestor.matches("article")) break;
+      }
+      if (!hasRepostIcon && !REPOST_CONTEXT_TEXT.test(context.textContent || "")) continue;
       const links = [...context.querySelectorAll("a[href]")];
       const enclosing = context.closest("a[href]");
       if (enclosing) links.push(enclosing);
@@ -116,10 +151,10 @@
     if (node.matches("article")) {
       const link = statusLink(node);
       const href = link && link.getAttribute("href");
-      const text = node.querySelector('[data-testid="tweetText"]');
+      const text = tweetTextElement(node);
       const bad = handleMatchesMute(handleFromHref(href), rules) ||
         repostHandles(node).some((handle) => handleMatchesMute(handle, rules)) ||
-        textMatchesMute(text ? text.textContent || "" : "", rules);
+        textMatchesMute(text ? tweetTextContent(text) : "", rules);
       setHidden(node.closest('[data-testid="cellInnerDiv"]') || node, bad);
       const id = postIdFromHref(href);
       if (bad && id) removedPosts.add(id);
@@ -132,6 +167,14 @@
   }
 
   const TARGET_SELECTOR = 'article, [data-testid="UserCell"]';
+  const CELL_SELECTOR = '[data-testid="cellInnerDiv"]';
+
+  function reevaluateHiddenCell(cell) {
+    const targets = [...cell.querySelectorAll(TARGET_SELECTOR)];
+    if (!targets.some((target) => target.matches("article"))) setHidden(cell, false);
+    for (const target of targets) evaluate(target);
+  }
+
   function applyAll() {
     ensureStyle();
     for (const target of hiddenTargets) target.classList.remove("tte-hidden");
@@ -153,11 +196,14 @@
   const observer = new MutationObserver((records) => {
     ensureStyle();
     const affected = new Set();
+    const changedHiddenCells = new Set();
     function collect(node, includeDescendants) {
       const element = node.nodeType === 1 ? node : node.parentElement;
       if (!element) return;
       const ancestor = element.closest(TARGET_SELECTOR);
       if (ancestor) affected.add(ancestor);
+      const cell = element.closest(CELL_SELECTOR);
+      if (cell && hiddenTargets.has(cell)) changedHiddenCells.add(cell);
       if (includeDescendants) {
         for (const child of element.querySelectorAll(TARGET_SELECTOR)) affected.add(child);
       }
@@ -167,6 +213,7 @@
       for (const node of record.addedNodes) collect(node, true);
     }
     for (const node of affected) evaluate(node);
+    for (const cell of changedHiddenCells) reevaluateHiddenCell(cell);
     if (timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
