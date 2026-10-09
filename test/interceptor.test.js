@@ -4,12 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  parseMuteRules,
-  textMatchesMute,
   isBadPerspectives,
-  screenNameOf,
-  authorHandlesOf,
-  tweetTextOf,
   unwrapTweet,
   bestMp4Url,
   ownVideoUrls,
@@ -71,51 +66,9 @@ function moduleEntry(items) {
   };
 }
 
-const RULES_OFF = parseMuteRules("{}");
-
-function ctx({ relOn = false, rules = RULES_OFF } = {}) {
-  return { relOn, rules };
+function ctx({ relOn = false } = {}) {
+  return { relOn };
 }
-
-// ---- parseMuteRules --------------------------------------------------------
-
-test("parseMuteRules: 空・不正な入力は無効ルールになる", () => {
-  for (const raw of ["", "{}", "not json", null, undefined]) {
-    const r = parseMuteRules(raw);
-    assert.equal(r.enabled, false);
-    assert.deepEqual(r.words, []);
-    assert.deepEqual(r.regexes, []);
-    assert.equal(r.handleEnabled, false);
-    assert.equal(r.handles.size, 0);
-  }
-});
-
-test("parseMuteRules: ワードは小文字化し、空要素は除く", () => {
-  const r = parseMuteRules(
-    JSON.stringify({ enabled: true, words: ["Foo", "BAR", "", "  "] })
-  );
-  assert.equal(r.enabled, true);
-  assert.deepEqual(r.words, ["foo", "bar", "  "]);
-});
-
-test("parseMuteRules: 不正な正規表現は捨て、有効なものだけ残す", () => {
-  const r = parseMuteRules(
-    JSON.stringify({ regexes: ["va(lid", "[a-z]+", "good"] })
-  );
-  assert.equal(r.regexes.length, 2);
-  assert.ok(r.regexes[0].test("ABC")); // "i" フラグ付き
-});
-
-test("parseMuteRules: @id は先頭の @ を外して小文字化、Set にする", () => {
-  const r = parseMuteRules(
-    JSON.stringify({ handleEnabled: true, handles: ["@Alice", "BOB", "@@x", ""] })
-  );
-  assert.equal(r.handleEnabled, true);
-  assert.ok(r.handles.has("alice"));
-  assert.ok(r.handles.has("bob"));
-  assert.ok(r.handles.has("@x")); // 先頭の1つだけ外す
-  assert.ok(!r.handles.has(""));
-});
 
 // ---- 小さな純粋関数 --------------------------------------------------------
 
@@ -127,17 +80,6 @@ test("isBadPerspectives: blocking か muting が true のときだけ true", () 
   assert.equal(isBadPerspectives(undefined), false);
 });
 
-test("screenNameOf: core 優先、なければ legacy、無ければ null（小文字化）", () => {
-  assert.equal(screenNameOf({ core: { screen_name: "Alice" } }), "alice");
-  assert.equal(screenNameOf({ legacy: { screen_name: "Bob" } }), "bob");
-  assert.equal(
-    screenNameOf({ core: { screen_name: "C" }, legacy: { screen_name: "D" } }),
-    "c"
-  );
-  assert.equal(screenNameOf({}), null);
-  assert.equal(screenNameOf(null), null);
-});
-
 test("unwrapTweet: TweetWithVisibilityResults を剥がす", () => {
   const inner = { rest_id: "9" };
   assert.equal(
@@ -146,32 +88,6 @@ test("unwrapTweet: TweetWithVisibilityResults を剥がす", () => {
   );
   assert.equal(unwrapTweet(inner), inner);
   assert.equal(unwrapTweet(null), null);
-});
-
-test("authorHandlesOf: 本人とリツイート元の著者を小文字で返す", () => {
-  const rt = tweetResult({ id: "2", screenName: "Origin" });
-  const tr = tweetResult({ id: "1", screenName: "Reposter", retweetOf: rt });
-  assert.deepEqual(authorHandlesOf(tr), ["reposter", "origin"]);
-});
-
-test("tweetTextOf: full_text と note_tweet を連結、無ければ text", () => {
-  assert.equal(tweetTextOf(tweetResult({ text: "hello" })), "hello");
-  assert.equal(
-    tweetTextOf(tweetResult({ text: "head", note: "long body" })),
-    "head\nlong body"
-  );
-  const legacyTextOnly = { legacy: { text: "fallback" } };
-  assert.equal(tweetTextOf(legacyTextOnly), "fallback");
-});
-
-test("textMatchesMute: 部分一致（大小無視）と正規表現", () => {
-  const rules = parseMuteRules(
-    JSON.stringify({ words: ["spam"], regexes: ["\\d{4}"] })
-  );
-  assert.equal(textMatchesMute("this is SPAM!", rules), true);
-  assert.equal(textMatchesMute("year 2026", rules), true);
-  assert.equal(textMatchesMute("clean text", rules), false);
-  assert.equal(textMatchesMute("", rules), false);
 });
 
 test("bestMp4Url: twimg の mp4 から最大ビットレートを選ぶ", () => {
@@ -269,33 +185,12 @@ test("itemContentIsBad: relOn のときブロック/ミュート投稿を除外"
   assert.equal(itemContentIsBad(ic, ctx({ relOn: false })), false);
 });
 
-test("itemContentIsBad: ワードミュート（有効時のみ）", () => {
-  const ic = { tweet_results: { result: tweetResult({ text: "buy crypto now" }) } };
-  const rules = parseMuteRules(JSON.stringify({ enabled: true, words: ["crypto"] }));
-  assert.equal(itemContentIsBad(ic, ctx({ rules })), true);
-  // wordMute 無効なら消さない
-  const off = parseMuteRules(JSON.stringify({ enabled: false, words: ["crypto"] }));
-  assert.equal(itemContentIsBad(ic, ctx({ rules: off })), false);
-});
-
-test("itemContentIsBad: @id ミュート（本人とリツイート元）", () => {
-  const rt = tweetResult({ id: "2", screenName: "badguy" });
-  const ic = {
-    tweet_results: { result: tweetResult({ id: "1", screenName: "ok", retweetOf: rt }) },
-  };
-  const rules = parseMuteRules(
-    JSON.stringify({ handleEnabled: true, handles: ["@BadGuy"] })
-  );
-  assert.equal(itemContentIsBad(ic, ctx({ rules })), true);
-});
-
-test("itemContentIsBad: ユーザー単体エントリ（関係情報と @id）", () => {
-  const ic = { user_results: { result: userResult({ screenName: "alice", blocking: true }) } };
-  assert.equal(itemContentIsBad(ic, ctx({ relOn: true })), true);
-
-  const ic2 = { user_results: { result: userResult({ screenName: "spammer" }) } };
-  const rules = parseMuteRules(JSON.stringify({ handleEnabled: true, handles: ["spammer"] }));
-  assert.equal(itemContentIsBad(ic2, ctx({ rules })), true);
+test("itemContentIsBad: ユーザー単体エントリの関係情報を判定する", () => {
+  for (const relationship of [{ blocking: true }, { muting: true }]) {
+    const ic = { user_results: { result: userResult(relationship) } };
+    assert.equal(itemContentIsBad(ic, ctx({ relOn: true })), true);
+    assert.equal(itemContentIsBad(ic, ctx()), false);
+  }
 });
 
 test("itemContentIsBad: 判定材料が無ければ残す（誤って消さない）", () => {
@@ -386,7 +281,7 @@ test("filterPayload: 何も有効でないコンテキストなら除外しな�
       { entries: [tweetEntry(tweetResult({ id: "1", blocking: true, text: "crypto" }))] },
     ],
   };
-  const removed = filterPayload(payload, ctx({ relOn: false, rules: RULES_OFF }));
+  const removed = filterPayload(payload, ctx({ relOn: false }));
   assert.equal(removed, 0);
   assert.equal(payload.instructions[0].entries.length, 1);
 });

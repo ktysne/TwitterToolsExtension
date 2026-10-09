@@ -1,22 +1,5 @@
-/*
- * interceptor.js  —  runs in the page's MAIN world (document_start)
- *
- * Xの GraphQL タイムライン系レスポンス（SearchTimeline / HomeTimeline /
- * UserTweets / TweetDetail など）を fetch / XHR の段階で横取りし、
- * ブロック/ミュート済みの投稿、およびワードミュート・@id ミュートに
- * 一致する投稿のエントリを丸ごと削除する。
- *
- * 関係情報の場所（実レスポンスで確認済み）:
- *   ...tweet_results.result[.tweet].core.user_results.result.relationship_perspectives
- *       = { blocked_by, blocking, followed_by, following, muting }
- *
- * 設計方針:
- *   - 失敗時は必ず「素通し（fail open）」にして、Xを壊さない。
- *   - instructions を持たないレスポンスには一切手を加えない。
- *   - ブロック/ミュート除外の ON/OFF は <html data-tte-enabled> を見る。
- *   - ワード/@id ミュートのルールは <div id="__tteMuteRules"> から読む。
- *   - 除外した累計件数は <html data-tte-removed="N"> に書き出す。
- */
+// MAIN world で relationship によるレスポンス除外、動画処理、リンク整形を行う。
+// 設定のオン/オフと relationship の除外累計は共有 DOM の属性で受け渡す。
 (() => {
   "use strict";
 
@@ -189,169 +172,20 @@
     return !!(rp && (rp.blocking === true || rp.muting === true));
   }
 
-  // --- ワード/@id ミュート（指定の語・正規表現・@id で投稿を消す） --------
-  // ルールは bridge.js（ISOLATED world）が <div id="__tteMuteRules"> に
-  // JSON で書き込む：{ enabled, words[], regexes[], handleEnabled, handles[] }。
-  // 部分一致・正規表現とも大文字小文字を区別しない。
-  let muteCache = {
-    raw: "",
-    enabled: false,
-    words: [],
-    regexes: [],
-    handleEnabled: false,
-    handles: new Set(),
-  };
-
-  // JSON 文字列（bridge.js が書く __tteMuteRules の中身）を解析して
-  // { raw, enabled, words[], regexes[RegExp], handleEnabled, handles:Set } にする。
-  // DOM に依存しない純粋関数なので単体テストできる。
-  function parseMuteRules(raw) {
-    let enabled = false,
-      words = [],
-      regexes = [],
-      handleEnabled = false,
-      handles = new Set();
-    try {
-      const p = JSON.parse(raw || "{}");
-      enabled = !!p.enabled;
-      words = (p.words || [])
-        .map((w) => String(w).toLowerCase())
-        .filter(Boolean);
-      regexes = (p.regexes || [])
-        .map((s) => {
-          try {
-            return new RegExp(String(s), "i");
-          } catch (_) {
-            return null; // 不正な正規表現は無視
-          }
-        })
-        .filter(Boolean);
-      handleEnabled = !!p.handleEnabled;
-      handles = new Set(
-        (p.handles || [])
-          .map((h) => String(h).replace(/^@/, "").toLowerCase())
-          .filter(Boolean)
-      );
-    } catch (_) {}
-    return { raw: raw || "", enabled, words, regexes, handleEnabled, handles };
-  }
-
-  function getMuteRules() {
-    const node = document.getElementById("__tteMuteRules");
-    const raw = (node && node.textContent) || "";
-    if (raw !== muteCache.raw) {
-      // JSON 文字列が変わったときだけ解析し直してキャッシュする
-      muteCache = parseMuteRules(raw);
-    }
-    return muteCache;
-  }
-
-  // フィルタ（ブロック/ミュート・ワード・@id のいずれか）が有効か
   function filterActive() {
-    const r = getMuteRules();
-    return isEnabled() || r.enabled || r.handleEnabled;
+    return isEnabled();
   }
 
-  // ユーザーオブジェクトから screen_name を取り出す（小文字化）。
-  // X は screen_name を user.legacy から user.core に移している途中なので、
-  // どちらの場所でも拾えるよう両方を見る。
-  function screenNameOf(userResult) {
-    if (!userResult) return null;
-    const sn =
-      (userResult.core && userResult.core.screen_name) ||
-      (userResult.legacy && userResult.legacy.screen_name) ||
-      null;
-    return sn ? String(sn).toLowerCase() : null;
-  }
-
-  // ツイートの著者ハンドル（本人＋リツイート元）を小文字で返す
-  function authorHandlesOf(tweetResult) {
-    const out = [];
-    const t = unwrapTweet(tweetResult);
-    if (!t) return out;
-    const a = t.core && t.core.user_results && t.core.user_results.result;
-    const an = screenNameOf(a);
-    if (an) out.push(an);
-    // リツイートの場合は元投稿の著者も対象にする
-    const rt =
-      t.legacy &&
-      t.legacy.retweeted_status_result &&
-      t.legacy.retweeted_status_result.result;
-    if (rt) {
-      const rtu = unwrapTweet(rt);
-      const rta =
-        rtu && rtu.core && rtu.core.user_results && rtu.core.user_results.result;
-      const rtn = screenNameOf(rta);
-      if (rtn) out.push(rtn);
-    }
-    return out;
-  }
-
-  function tweetTextOf(tweetResult) {
-    const t = unwrapTweet(tweetResult);
-    if (!t) return "";
-    let text = (t.legacy && (t.legacy.full_text || t.legacy.text)) || "";
-    // 長文ツイート（note tweet）の本文も対象に含める
-    const note =
-      t.note_tweet &&
-      t.note_tweet.note_tweet_results &&
-      t.note_tweet.note_tweet_results.result;
-    if (note && note.text) text += "\n" + note.text;
-    return text;
-  }
-
-  function textMatchesMute(text, rules) {
-    if (!text) return false;
-    const r = rules;
-    const lower = text.toLowerCase();
-    for (const w of r.words) if (lower.includes(w)) return true;
-    for (const re of r.regexes) {
-      try {
-        if (re.test(text)) return true;
-      } catch (_) {}
-    }
-    return false;
-  }
-
-  // itemContent（単一エントリ or モジュール内アイテム）が除外対象か。
-  // ctx = { relOn:boolean, rules:parseMuteRules の戻り値 } を受け取り、DOM に
-  // 触れない純粋判定にしてある（レスポンス1件につき ctx を1度だけ作る）。
   function itemContentIsBad(ic, ctx) {
-    if (!ic) return false;
-    const rules = ctx.rules;
-    const relOn = ctx.relOn;
-
-    // 投稿
+    if (!ic || !ctx.relOn) return false;
     const tweetResult = ic.tweet_results && ic.tweet_results.result;
     if (tweetResult) {
-      if (relOn) {
-        const t = unwrapTweet(tweetResult);
-        const ur =
-          t && t.core && t.core.user_results && t.core.user_results.result;
-        if (isBadPerspectives(ur && ur.relationship_perspectives)) return true;
-      }
-      if (rules.enabled && textMatchesMute(tweetTextOf(tweetResult), rules))
-        return true;
-      if (rules.handleEnabled && rules.handles.size) {
-        for (const h of authorHandlesOf(tweetResult)) {
-          if (rules.handles.has(h)) return true;
-        }
-      }
-      return false;
+      const t = unwrapTweet(tweetResult);
+      const ur = t && t.core && t.core.user_results && t.core.user_results.result;
+      return isBadPerspectives(ur && ur.relationship_perspectives);
     }
-
-    // ユーザー（アカウント検索・おすすめユーザー等）
     const userResult = ic.user_results && ic.user_results.result;
-    if (userResult) {
-      if (relOn && isBadPerspectives(userResult.relationship_perspectives)) {
-        return true;
-      }
-      const sn = screenNameOf(userResult);
-      if (rules.handleEnabled && sn && rules.handles.has(sn)) return true;
-      return false;
-    }
-
-    return false;
+    return isBadPerspectives(userResult && userResult.relationship_perspectives);
   }
 
   // --- エントリ配列のフィルタ -------------------------------------------
@@ -396,7 +230,7 @@
   // ctx を省略した場合は現在の DOM 設定から組み立てる（実行時の呼び出し用）。
   function filterPayload(root, ctx) {
     let removed = 0;
-    if (!ctx) ctx = { relOn: isEnabled(), rules: getMuteRules() };
+    if (!ctx) ctx = { relOn: isEnabled() };
 
     function walk(node) {
       if (!node || typeof node !== "object") return;
@@ -745,12 +579,7 @@
   // 未定義なので何もしない（content script の挙動は変わらない）。
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
-      parseMuteRules,
-      textMatchesMute,
       isBadPerspectives,
-      screenNameOf,
-      authorHandlesOf,
-      tweetTextOf,
       unwrapTweet,
       bestMp4Url,
       ownVideoUrls,
