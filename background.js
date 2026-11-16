@@ -227,14 +227,55 @@ function release(filename, token) {
 // 他の拡張が onDeterminingFilename を登録していると、download() の filename が使われず
 // ダウンロードフォルダ直下に保存されることがあるため、自分の発行分は改めて指定する。
 const intendedPaths = new Map();
+// Chrome は引数無しの suggest() も空の保存名の指定として競合に含め、更新の新しい拡張が勝つ。
+// 常時登録すると他の拡張のダウンロードの保存名を消すため、記録がある間と猶予の間だけ登録する。
+const DETERMINER_GRACE_MS = 1000;
+let determinerEvent =
+  typeof chrome !== "undefined" && chrome.downloads
+    ? chrome.downloads.onDeterminingFilename
+    : null;
+let ownExtensionId = typeof chrome !== "undefined" && chrome.runtime ? chrome.runtime.id : null;
+let determinerRemovalTimer = null;
+
+function intendedPathListener(downloadItem, suggest) {
+  suggestIntendedPath(downloadItem, suggest, ownExtensionId);
+  scheduleDeterminerRemoval();
+}
+
+function ensureDeterminerListener() {
+  clearTimeout(determinerRemovalTimer);
+  determinerRemovalTimer = null;
+  if (determinerEvent && !determinerEvent.hasListener(intendedPathListener)) {
+    determinerEvent.addListener(intendedPathListener);
+  }
+}
+
+function scheduleDeterminerRemoval() {
+  if (intendedPaths.size !== 0) return;
+  clearTimeout(determinerRemovalTimer);
+  determinerRemovalTimer = setTimeout(() => {
+    determinerRemovalTimer = null;
+    if (
+      intendedPaths.size === 0 &&
+      determinerEvent &&
+      determinerEvent.hasListener(intendedPathListener)
+    ) {
+      determinerEvent.removeListener(intendedPathListener);
+    }
+  }, DETERMINER_GRACE_MS);
+  if (determinerRemovalTimer && typeof determinerRemovalTimer.unref === "function") {
+    determinerRemovalTimer.unref();
+  }
+}
 
 function rememberIntendedPath(url, filename) {
   const entry = { filename };
   const queue = intendedPaths.get(url) || [];
   queue.push(entry);
   intendedPaths.set(url, queue);
-  const timer = setTimeout(() => forgetIntendedPath(url, entry), PENDING_TTL_MS);
-  if (timer && typeof timer.unref === "function") timer.unref();
+  ensureDeterminerListener();
+  entry.timer = setTimeout(() => forgetIntendedPath(url, entry), PENDING_TTL_MS);
+  if (entry.timer && typeof entry.timer.unref === "function") entry.timer.unref();
   return entry;
 }
 
@@ -242,14 +283,18 @@ function forgetIntendedPath(url, entry) {
   const queue = intendedPaths.get(url);
   if (!queue) return;
   const index = queue.indexOf(entry);
-  if (index >= 0) queue.splice(index, 1);
+  if (index < 0) return;
+  clearTimeout(entry.timer);
+  queue.splice(index, 1);
   if (queue.length === 0) intendedPaths.delete(url);
+  scheduleDeterminerRemoval();
 }
 
 function takeIntendedPath(url) {
   const queue = intendedPaths.get(url);
   if (!queue) return null;
   const entry = queue.shift();
+  clearTimeout(entry.timer);
   if (queue.length === 0) intendedPaths.delete(url);
   return entry.filename;
 }
@@ -391,15 +436,10 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
   });
 }
 
-if (
-  typeof chrome !== "undefined" &&
-  chrome.downloads &&
-  chrome.downloads.onDeterminingFilename
-) {
-  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-    suggestIntendedPath(downloadItem, suggest, chrome.runtime.id);
-  });
-}
+// Chrome に残った lazy listener で起動されたイベントへ応答するため、同期で登録する。
+// 登録が間に合わないと Chrome が determiner の応答を 15 秒待つ。
+ensureDeterminerListener();
+scheduleDeterminerRemoval();
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -413,9 +453,23 @@ if (typeof module !== "undefined" && module.exports) {
     makeFileExists,
     handleDownloadMessage,
     suggestIntendedPath,
+    _setDeterminerEvent: (event, extensionId) => {
+      determinerEvent = event;
+      ownExtensionId = extensionId;
+    },
     _resetPending: () => {
       pending.clear();
+      for (const queue of intendedPaths.values()) {
+        for (const entry of queue) clearTimeout(entry.timer);
+      }
       intendedPaths.clear();
+      clearTimeout(determinerRemovalTimer);
+      determinerRemovalTimer = null;
+      if (determinerEvent && determinerEvent.hasListener(intendedPathListener)) {
+        determinerEvent.removeListener(intendedPathListener);
+      }
+      determinerEvent = null;
+      ownExtensionId = null;
     }, // テストで予約状態を初期化するため
   };
 }

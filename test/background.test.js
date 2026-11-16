@@ -14,6 +14,7 @@ const {
   makeFileExists,
   handleDownloadMessage,
   suggestIntendedPath,
+  _setDeterminerEvent,
   _resetPending,
 } = require("../background.js");
 
@@ -656,4 +657,149 @@ test("suggestIntendedPath: 開始に失敗したダウンロードの保存パ�
     determine({ byExtensionId: OWN_ID, url: deps.calls[0].url }),
     [undefined]
   );
+});
+
+function makeDeterminerEvent() {
+  const listeners = new Set();
+  return {
+    addCalls: 0,
+    addListener(listener) {
+      this.addCalls++;
+      listeners.add(listener);
+    },
+    removeListener(listener) {
+      listeners.delete(listener);
+    },
+    hasListener(listener) {
+      return listeners.has(listener);
+    },
+    get size() {
+      return listeners.size;
+    },
+    determine(url) {
+      const suggestions = [];
+      for (const listener of listeners) {
+        listener({ byExtensionId: OWN_ID, url }, (s) => suggestions.push(s));
+      }
+      return suggestions;
+    },
+  };
+}
+
+function setupDeterminer(t) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const event = makeDeterminerEvent();
+  _setDeterminerEvent(event, OWN_ID);
+  t.after(() => _resetPending());
+  return event;
+}
+
+const DOWNLOAD_MESSAGE = { type: "tte-download-images", items: [item()] };
+
+test("onDeterminingFilename: download の呼び出し時点で登録済みである", async (t) => {
+  const event = setupDeterminer(t);
+  const deps = makeDeps({
+    download: (opts) => {
+      assert.equal(event.size, 1);
+      assert.deepEqual(event.determine(opts.url), [
+        { filename: opts.filename, conflictAction: "uniquify" },
+      ]);
+    },
+  });
+  assert.equal((await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps)).started, 1);
+});
+
+test("onDeterminingFilename: 最後の記録を取り出して1000ms後に解除する", async (t) => {
+  const event = setupDeterminer(t);
+  const deps = makeDeps();
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  assert.equal(event.determine(deps.calls[0].url)[0].filename, deps.calls[0].filename);
+  t.mock.timers.tick(999);
+  assert.equal(event.size, 1);
+  t.mock.timers.tick(1);
+  assert.equal(event.size, 0);
+});
+
+for (const failure of ["reject", "throw"]) {
+  test(`onDeterminingFilename: 開始失敗（${failure}）だけなら猶予後に解除する`, async (t) => {
+    const event = setupDeterminer(t);
+    const deps = makeDeps({
+      download: () => {
+        if (failure === "throw") throw new Error("start failed");
+        return Promise.reject(new Error("start failed"));
+      },
+    });
+    assert.equal((await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps)).failed, 1);
+    t.mock.timers.tick(999);
+    assert.equal(event.size, 1);
+    t.mock.timers.tick(1);
+    assert.equal(event.size, 0);
+  });
+}
+
+test("onDeterminingFilename: TTLの60秒で記録を外し、猶予後に解除する", async (t) => {
+  const event = setupDeterminer(t);
+  const deps = makeDeps();
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  t.mock.timers.tick(59999);
+  assert.equal(event.size, 1);
+  t.mock.timers.tick(1);
+  assert.deepEqual(determine({ byExtensionId: OWN_ID, url: deps.calls[0].url }), [undefined]);
+  t.mock.timers.tick(999);
+  assert.equal(event.size, 1);
+  t.mock.timers.tick(1);
+  assert.equal(event.size, 0);
+});
+
+test("onDeterminingFilename: 2件待機中は二重登録せず、1件取り出しても解除しない", async (t) => {
+  const event = setupDeterminer(t);
+  const deps = makeDeps();
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  assert.equal(event.addCalls, 1);
+  const url = deps.calls[0].url;
+  event.determine(url);
+  t.mock.timers.tick(1000);
+  assert.equal(event.size, 1);
+  assert.equal(event.determine(url)[0].filename, deps.calls[1].filename);
+  t.mock.timers.tick(1000);
+  assert.equal(event.size, 0);
+});
+
+test("onDeterminingFilename: 猶予中に新しく発行すると解除を取り消す", async (t) => {
+  const event = setupDeterminer(t);
+  const deps = makeDeps();
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  event.determine(deps.calls[0].url);
+  t.mock.timers.tick(500);
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  t.mock.timers.tick(500);
+  assert.equal(event.size, 1);
+  assert.equal(event.addCalls, 1);
+  assert.equal(event.determine(deps.calls[1].url)[0].filename, deps.calls[1].filename);
+  t.mock.timers.tick(1000);
+  assert.equal(event.size, 0);
+  await handleDownloadMessage(DOWNLOAD_MESSAGE, SENDER, deps);
+  assert.equal(event.size, 1);
+  assert.equal(event.addCalls, 2);
+});
+
+test("onDeterminingFilename: 起動時に同期登録し、記録が無ければ猶予後に解除する", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const event = makeDeterminerEvent();
+  const context = {
+    chrome: { downloads: { onDeterminingFilename: event }, runtime: { id: OWN_ID } },
+    module: { exports: {} },
+    require: () => require("../savepath.js"),
+    setTimeout,
+    clearTimeout,
+  };
+  const source = require("node:fs").readFileSync(require.resolve("../background.js"), "utf8");
+  require("node:vm").runInNewContext(source, context);
+  t.after(() => context.module.exports._resetPending());
+  assert.equal(event.size, 1);
+  t.mock.timers.tick(999);
+  assert.equal(event.size, 1);
+  t.mock.timers.tick(1);
+  assert.equal(event.size, 0);
 });
